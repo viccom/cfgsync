@@ -1,0 +1,20 @@
+# 1Remote-Cloud reverse proxy example.
+# Place at /etc/caddy/Caddyfile, then `systemctl reload caddy`.
+#
+# Requirements:
+#   - Point api.example.com DNS A/AAAA to this VPS.
+#   - Caddy will auto-provision a Let's Encrypt cert on first run.
+#   - Port 80 and 443 must be reachable from the public internet.
+
+api.example.com {
+    encode gzip zstd
+    reverse_proxy 127.0.0.1:28972 {
+        header_up X-Real-IP {remote_host}
+    }
+
+    tls <your-email@example.com>
+
+    header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    header X-Content-Type-Options "nosniff"
+    header Referrer-Policy "no-referrer"
+}

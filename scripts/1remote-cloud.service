@@ -1,0 +1,24 @@
+[Unit]
+Description=1Remote Cloud Sync backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=1remote
+Group=1remote
+WorkingDirectory=/opt/1remote-cloud
+ExecStart=/opt/1remote-cloud/1remote-cloud
+Restart=on-failure
+RestartSec=5s
+EnvironmentFile=/etc/1remote-cloud/env
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/1remote-cloud/data /opt/1remote-cloud/backups
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

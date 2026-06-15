@@ -1,0 +1,23 @@
+# Build artifacts
+/1remote-cloud
+/dist/
+*.exe
+*.test
+*.out
+
+# Local dev
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+.env
+.env.local
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
