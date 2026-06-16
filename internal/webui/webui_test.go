@@ -50,7 +50,14 @@ func TestHandler_SPAFallbackOnUnknownRoute(t *testing.T) {
 	}
 }
 
-func TestHandler_DoesNotPanicOnAPIPath(t *testing.T) {
+// TestHandler_UnknownPathFallbacksToIndex pins two contracts:
+//  1. A non-assets unknown path (e.g., /api/v1/health passed to webui
+//     by mistake) falls back to index.html (200, text/html). This is
+//     important because the api/* path will be matched by the API mux
+//     first in production; this test pins what webui.Handler does
+//     when called directly with an /api/* path.
+//  2. No panic occurs on any path.
+func TestHandler_UnknownPathFallbacksToIndex(t *testing.T) {
 	h := Handler()
 	req := httptest.NewRequest("GET", "/api/v1/health", nil)
 	w := httptest.NewRecorder()
@@ -60,5 +67,14 @@ func TestHandler_DoesNotPanicOnAPIPath(t *testing.T) {
 		}
 	}()
 	h.ServeHTTP(w, req)
-	_, _ = io.ReadAll(w.Body)
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 (SPA fallback), got %d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Header().Get("Content-Type"), "text/html") {
+		t.Errorf("expected text/html for SPA fallback, got %q", w.Header().Get("Content-Type"))
+	}
+	// Body must actually be readable (regression guard against an early-return bug).
+	if _, err := io.ReadAll(w.Body); err != nil {
+		t.Errorf("read body: %v", err)
+	}
 }
