@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -405,6 +406,90 @@ func TestAdminPromoteUser_RejectsNonAdmin(t *testing.T) {
 
 	h := adminChain(env, AdminPromoteUser(env.db))
 	w := doAdminPromote(h, targetUID, tok)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", w.Code)
+	}
+}
+
+// --- AdminListUsers ---
+
+func TestAdminListUsers_ReturnsAll(t *testing.T) {
+	env := newTestEnv(t)
+	adminUID := env.seedUser(t, "admin@example.com", "p12345678", true)
+	env.seedUser(t, "alice@example.com", "p12345678", false)
+	env.seedUser(t, "bob@example.com", "p12345678", false)
+	tok := env.userToken(adminUID, "admin@example.com", true)
+
+	h := adminChain(env, AdminListUsers(env.db))
+	w := doAdminGet(h, "/api/v1/admin/users", tok)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	for _, want := range []string{`"email":"admin@example.com"`, `"email":"alice@example.com"`, `"email":"bob@example.com"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected %s in body, got %s", want, body)
+		}
+	}
+	if strings.Contains(body, "password_hash") {
+		t.Errorf("password_hash must never appear in admin user list: %s", body)
+	}
+}
+
+func TestAdminListUsers_DefaultLimit(t *testing.T) {
+	env := newTestEnv(t)
+	adminUID := env.seedUser(t, "admin@example.com", "p12345678", true)
+	tok := env.userToken(adminUID, "admin@example.com", true)
+
+	h := adminChain(env, AdminListUsers(env.db))
+	w := doAdminGet(h, "/api/v1/admin/users", tok)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"limit":20`) {
+		t.Errorf("expected default limit 20, got %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"offset":0`) {
+		t.Errorf("expected default offset 0, got %s", w.Body.String())
+	}
+}
+
+func TestAdminListUsers_Pagination(t *testing.T) {
+	env := newTestEnv(t)
+	adminUID := env.seedUser(t, "admin@example.com", "p12345678", true)
+	for i := 0; i < 25; i++ {
+		env.seedUser(t, "u"+strconv.Itoa(i)+"@example.com", "p12345678", false)
+	}
+	tok := env.userToken(adminUID, "admin@example.com", true)
+
+	h := adminChain(env, AdminListUsers(env.db))
+	w := doAdminGet(h, "/api/v1/admin/users?limit=10&offset=10", tok)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Users  []model.AdminUserInfo `json:"users"`
+		Limit  int                   `json:"limit"`
+		Offset int                   `json:"offset"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v body=%s", err, w.Body.String())
+	}
+	if resp.Limit != 10 || resp.Offset != 10 {
+		t.Errorf("expected limit=10 offset=10, got limit=%d offset=%d", resp.Limit, resp.Offset)
+	}
+	if len(resp.Users) != 10 {
+		t.Errorf("expected 10 users in page, got %d", len(resp.Users))
+	}
+}
+
+func TestAdminListUsers_RejectsNonAdmin(t *testing.T) {
+	env := newTestEnv(t)
+	uid := env.seedUser(t, "u@example.com", "p12345678", false)
+	tok := env.userToken(uid, "u@example.com", false)
+
+	h := adminChain(env, AdminListUsers(env.db))
+	w := doAdminGet(h, "/api/v1/admin/users", tok)
 	if w.Code != http.StatusForbidden {
 		t.Errorf("expected 403, got %d", w.Code)
 	}
