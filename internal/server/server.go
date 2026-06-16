@@ -10,6 +10,7 @@ import (
 	"github.com/viccom/cfgsync/internal/auth"
 	"github.com/viccom/cfgsync/internal/config"
 	"github.com/viccom/cfgsync/internal/handler"
+	"github.com/viccom/cfgsync/internal/webui"
 )
 
 // New builds the top-level HTTP handler.
@@ -49,6 +50,10 @@ func New(cfg *config.Config, db *sql.DB) http.Handler {
 	// App token (AppTokenMW)
 	mux.Handle("GET /api/v1/apps/{app_id}/config", auth.AppTokenMW(db, handler.GetConfig(db)))
 	mux.Handle("PUT /api/v1/apps/{app_id}/config", auth.AppTokenMW(db, handler.PutConfig(db, cfg)))
+
+	// Catch-all: serve the embedded SPA. /api/v1/* is matched by the more specific
+	// routes above (Go 1.22's method-aware mux takes the explicit handler first).
+	mux.Handle("/", webui.Handler())
 
 	return chain(mux, logMW, recoverMW)
 }

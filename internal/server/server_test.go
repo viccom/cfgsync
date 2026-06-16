@@ -160,3 +160,54 @@ func doReqSimple(t *testing.T, h http.Handler, method, path, token string, body 
 	h.ServeHTTP(w, r)
 	return w
 }
+
+// TestServer_WebUI_ServesIndexOnRoot confirms the embedded SPA is served at /.
+func TestServer_WebUI_ServesIndexOnRoot(t *testing.T) {
+	env := openTempDB(t)
+	cfg := &config.Config{
+		JWTSecret:         []byte("test-secret-test-secret-test-secret"),
+		AccessTTL:         time.Hour,
+		RefreshTTL:        30 * 24 * time.Hour,
+		UserStorageLimit:  100 * 1024 * 1024,
+		UserAppTokenLimit: 100,
+		HistoryPerApp:     50,
+		MaxPayloadBytes:   4 * 1024 * 1024,
+		AppTokenPrefix:    "1rc_",
+	}
+	h := New(cfg, env)
+	w := doReqSimple(t, h, "GET", "/", "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if !strings.Contains(w.Header().Get("Content-Type"), "text/html") {
+		t.Errorf("expected text/html, got %q", w.Header().Get("Content-Type"))
+	}
+}
+
+// TestServer_WebUI_APIRouteNotShadowed confirms the catch-all webui mount does
+// not shadow the explicit /api/v1/* routes.
+func TestServer_WebUI_APIRouteNotShadowed(t *testing.T) {
+	env := openTempDB(t)
+	cfg := &config.Config{
+		JWTSecret:         []byte("test-secret-test-secret-test-secret"),
+		AccessTTL:         time.Hour,
+		RefreshTTL:        30 * 24 * time.Hour,
+		UserStorageLimit:  100 * 1024 * 1024,
+		UserAppTokenLimit: 100,
+		HistoryPerApp:     50,
+		MaxPayloadBytes:   4 * 1024 * 1024,
+		AppTokenPrefix:    "1rc_",
+	}
+	h := New(cfg, env)
+	w := doReqSimple(t, h, "GET", "/api/v1/health", "", nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if !strings.Contains(w.Header().Get("Content-Type"), "application/json") {
+		t.Errorf("expected application/json from /api/v1/health, got %q (body=%s)",
+			w.Header().Get("Content-Type"), w.Body.String())
+	}
+	if strings.Contains(strings.ToLower(w.Body.String()), "<!doctype") {
+		t.Errorf("/api/v1/health returned HTML; the webui catch-all is shadowing the API route")
+	}
+}
