@@ -147,3 +147,42 @@ func DeleteAppToken(db *sql.DB) http.HandlerFunc {
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
+
+// DeleteAppData wipes all data the user has stored for a given app_id:
+// configs row, all config_history rows, and the app_token for this (user, app_id).
+// Idempotent — returns 204 whether or not anything existed. The user's other
+// (user, app_id) pairs and other users' data are untouched.
+func DeleteAppData(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		uid := auth.UserID(r.Context())
+		appID := r.PathValue("app_id")
+		if appID == "" {
+			writeError(w, http.StatusBadRequest, "invalid_app_id")
+			return
+		}
+
+		tx, err := db.BeginTx(r.Context(), nil)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal")
+			return
+		}
+		defer tx.Rollback()
+
+		for _, q := range []string{
+			`DELETE FROM configs        WHERE user_id = ? AND app_id = ?`,
+			`DELETE FROM config_history WHERE user_id = ? AND app_id = ?`,
+			`DELETE FROM app_tokens     WHERE user_id = ? AND app_id = ?`,
+		} {
+			if _, err := tx.ExecContext(r.Context(), q, uid, appID); err != nil {
+				writeError(w, http.StatusInternalServerError, "internal")
+				return
+			}
+		}
+
+		if err := tx.Commit(); err != nil {
+			writeError(w, http.StatusInternalServerError, "internal")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}

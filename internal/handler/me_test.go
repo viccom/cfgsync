@@ -247,3 +247,85 @@ func TestDeleteAppToken_DoesNotDeleteOtherUsers(t *testing.T) {
 		t.Errorf("other user's token should be untouched, got %d", theirsCount)
 	}
 }
+
+// doDeleteAppData issues DELETE /api/v1/me/apps/{app_id}/data with the path value set.
+func doDeleteAppData(h http.Handler, appID, token string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest("DELETE", "/api/v1/me/apps/"+appID+"/data", &bytes.Buffer{})
+	req.SetPathValue("app_id", appID)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	return w
+}
+
+func TestDeleteAppData_WipesEverythingForPair(t *testing.T) {
+	env := newTestEnv(t)
+	adminUID := env.seedUser(t, "admin@example.com", "p12345678", true)
+	env.seedApp(t, "com.foo", "Foo", adminUID)
+	env.seedApp(t, "com.bar", "Bar", adminUID)
+
+	uid := env.seedUser(t, "u@example.com", "p12345678", false)
+	tok := env.userToken(uid, "u@example.com", false)
+	now := nowUnix()
+
+	// Seed configs + history + app_tokens for TWO (uid, app_id) pairs.
+	for _, appID := range []string{"com.foo", "com.bar"} {
+		if _, err := env.db.Exec(
+			`INSERT INTO configs (user_id, app_id, version, payload, updated_at, updated_by) VALUES (?, ?, 1, 'p', ?, 'me')`,
+			uid, appID, now,
+		); err != nil {
+			t.Fatalf("seed config %s: %v", appID, err)
+		}
+		if _, err := env.db.Exec(
+			`INSERT INTO config_history (user_id, app_id, version, payload, updated_by, created_at) VALUES (?, ?, 1, 'p', 'me', ?)`,
+			uid, appID, now,
+		); err != nil {
+			t.Fatalf("seed history %s: %v", appID, err)
+		}
+		if _, err := env.db.Exec(
+			`INSERT INTO app_tokens (token_hash, token_prefix, user_id, app_id, label, created_at) VALUES (?, ?, ?, ?, '', ?)`,
+			"hash_"+appID, "1rc_"+appID[:4], uid, appID, now,
+		); err != nil {
+			t.Fatalf("seed token %s: %v", appID, err)
+		}
+	}
+
+	h := auth.UserMW(env.cfg.JWTSecret, DeleteAppData(env.db))
+	w := doDeleteAppData(h, "com.foo", tok)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	// com.foo for uid: all gone.
+	var fooConfig, fooHistory, fooToken int
+	env.db.QueryRow(`SELECT COUNT(*) FROM configs        WHERE user_id = ? AND app_id = 'com.foo'`, uid).Scan(&fooConfig)
+	env.db.QueryRow(`SELECT COUNT(*) FROM config_history WHERE user_id = ? AND app_id = 'com.foo'`, uid).Scan(&fooHistory)
+	env.db.QueryRow(`SELECT COUNT(*) FROM app_tokens     WHERE user_id = ? AND app_id = 'com.foo'`, uid).Scan(&fooToken)
+	if fooConfig != 0 || fooHistory != 0 || fooToken != 0 {
+		t.Errorf("com.foo not wiped: config=%d history=%d token=%d", fooConfig, fooHistory, fooToken)
+	}
+
+	// com.bar for uid: untouched.
+	var barConfig, barHistory, barToken int
+	env.db.QueryRow(`SELECT COUNT(*) FROM configs        WHERE user_id = ? AND app_id = 'com.bar'`, uid).Scan(&barConfig)
+	env.db.QueryRow(`SELECT COUNT(*) FROM config_history WHERE user_id = ? AND app_id = 'com.bar'`, uid).Scan(&barHistory)
+	env.db.QueryRow(`SELECT COUNT(*) FROM app_tokens     WHERE user_id = ? AND app_id = 'com.bar'`, uid).Scan(&barToken)
+	if barConfig != 1 || barHistory != 1 || barToken != 1 {
+		t.Errorf("com.bar should be untouched: config=%d history=%d token=%d", barConfig, barHistory, barToken)
+	}
+}
+
+func TestDeleteAppData_Idempotent(t *testing.T) {
+	env := newTestEnv(t)
+	uid := env.seedUser(t, "u@example.com", "p12345678", false)
+	tok := env.userToken(uid, "u@example.com", false)
+
+	// No prior data for (uid, com.foo) — still 204.
+	h := auth.UserMW(env.cfg.JWTSecret, DeleteAppData(env.db))
+	w := doDeleteAppData(h, "com.foo", tok)
+	if w.Code != http.StatusNoContent {
+		t.Errorf("expected 204 on empty delete, got %d", w.Code)
+	}
+}
