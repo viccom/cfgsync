@@ -145,10 +145,16 @@ Caddy (`deploy/Caddyfile`) terminates TLS and reverse-proxies to `127.0.0.1:2897
 
 Releases are cut by pushing a `v*` tag; `.github/workflows/release.yml` builds `linux-amd64` with `-ldflags="-s -w"` and attaches a `.sha256`.
 
-## Spec & Plan
+## Documentation
 
+User-facing docs:
+- **End-user guide** (register, manage tokens, quota, admin): [`docs/user-guide.md`](docs/user-guide.md)
+- **Developer integration guide** (sync API, optimistic lock, curl, pseudo-code): [`docs/developer-guide.md`](docs/developer-guide.md)
+
+Internal design docs:
 - Design spec: [`docs/superpowers/specs/2026-06-16-multi-app-config-sync-design.md`](docs/superpowers/specs/2026-06-16-multi-app-config-sync-design.md)
 - MVP implementation plan: [`docs/superpowers/plans/2026-06-16-multi-app-config-sync-mvp.md`](docs/superpowers/plans/2026-06-16-multi-app-config-sync-mvp.md)
+- WebUI design spec: [`docs/superpowers/specs/2026-06-16-cfgsync-webui-design.md`](docs/superpowers/specs/2026-06-16-cfgsync-webui-design.md)
 
 ## License
 
