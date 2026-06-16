@@ -145,7 +145,7 @@ func Logout(db *sql.DB) http.HandlerFunc {
 // --- helpers ---
 
 func issueAndRespond(w http.ResponseWriter, db *sql.DB, r *http.Request, cfg *config.Config, uid, email string) {
-	access, err := auth.IssueAccess(cfg.JWTSecret, uid, email, cfg.AccessTTL)
+	access, err := auth.IssueAccess(cfg.JWTSecret, uid, email, false, cfg.AccessTTL)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "issue access failed")
 		return
