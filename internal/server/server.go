@@ -1,4 +1,7 @@
 // Package server wires routing and middleware.
+//
+// Temporary stub during multi-app MVP rollout: only health is wired here.
+// Full route table is re-installed in Task 10 of the MVP plan.
 package server
 
 import (
@@ -7,7 +10,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/1remote/1remote-cloud/internal/auth"
 	"github.com/1remote/1remote-cloud/internal/config"
 	"github.com/1remote/1remote-cloud/internal/handler"
 )
@@ -15,18 +17,7 @@ import (
 // New builds the top-level HTTP handler.
 func New(cfg *config.Config, db *sql.DB) http.Handler {
 	mux := http.NewServeMux()
-
-	// Public
-	mux.HandleFunc("POST /api/v1/auth/register", handler.Register(db, cfg))
-	mux.HandleFunc("POST /api/v1/auth/login", handler.Login(db, cfg))
-	mux.HandleFunc("POST /api/v1/auth/refresh", handler.Refresh(db, cfg))
 	mux.HandleFunc("GET /api/v1/health", handler.Health(db))
-
-	// Authenticated
-	mux.Handle("POST /api/v1/auth/logout", auth.Middleware(cfg.JWTSecret, handler.Logout(db)))
-	mux.Handle("GET /api/v1/config", auth.Middleware(cfg.JWTSecret, handler.GetConfig(db)))
-	mux.Handle("PUT /api/v1/config", auth.Middleware(cfg.JWTSecret, handler.PutConfig(db)))
-
 	return chain(mux, recoverMW, logMW)
 }
 
