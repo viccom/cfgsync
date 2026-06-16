@@ -75,6 +75,70 @@ func TestCreateAppToken_AppNotFound(t *testing.T) {
 	}
 }
 
+func TestCreateAppToken_QuotaReached(t *testing.T) {
+	env := newTestEnv(t)
+	env.cfg.UserAppTokenLimit = 2
+	adminUID := env.seedUser(t, "admin@example.com", "p12345678", true)
+
+	uid := env.seedUser(t, "u@example.com", "p12345678", false)
+	tok := env.userToken(uid, "u@example.com", false)
+	now := nowUnix()
+
+	// Seed 2 existing tokens for two different app_ids (filling the limit).
+	for _, app := range []string{"com.foo", "com.bar"} {
+		env.seedApp(t, app, app, adminUID)
+		if _, err := env.db.Exec(
+			`INSERT INTO app_tokens (token_hash, token_prefix, user_id, app_id, label, created_at) VALUES (?, ?, ?, ?, '', ?)`,
+			"hash_"+app, "1rc_"+app[:4], uid, app, now,
+		); err != nil {
+			t.Fatalf("seed %s: %v", app, err)
+		}
+	}
+
+	// Third NEW app should hit the limit.
+	env.seedApp(t, "com.baz", "Baz", adminUID)
+	h := auth.UserMW(env.cfg.JWTSecret, CreateAppToken(env.db, env.cfg))
+	w := doPostAppToken(h, "com.baz", tok, nil)
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413, got %d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"app_token_limit_reached"`) {
+		t.Errorf("expected app_token_limit_reached in %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"limit":2`) {
+		t.Errorf("expected limit:2 in %s", w.Body.String())
+	}
+}
+
+func TestCreateAppToken_QuotaReplaceDoesNotConsume(t *testing.T) {
+	env := newTestEnv(t)
+	env.cfg.UserAppTokenLimit = 1
+	adminUID := env.seedUser(t, "admin@example.com", "p12345678", true)
+	env.seedApp(t, "com.foo", "Foo", adminUID)
+
+	uid := env.seedUser(t, "u@example.com", "p12345678", false)
+	tok := env.userToken(uid, "u@example.com", false)
+
+	// First create (limit=1, count=0 -> ok).
+	h := auth.UserMW(env.cfg.JWTSecret, CreateAppToken(env.db, env.cfg))
+	w1 := doPostAppToken(h, "com.foo", tok, nil)
+	if w1.Code != http.StatusOK {
+		t.Fatalf("first create failed: %d body=%s", w1.Code, w1.Body.String())
+	}
+
+	// Replace same (user, app_id) — should still succeed (count unchanged).
+	w2 := doPostAppToken(h, "com.foo", tok, nil)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("replace failed: %d body=%s", w2.Code, w2.Body.String())
+	}
+
+	var n int
+	env.db.QueryRow(`SELECT COUNT(*) FROM app_tokens WHERE user_id = ?`, uid).Scan(&n)
+	if n != 1 {
+		t.Errorf("expected 1 token after replace, got %d", n)
+	}
+}
+
 // doPostAppToken posts to /api/v1/me/apps/{app_id}/token with path value set.
 func doPostAppToken(h http.Handler, appID, token string, body interface{}) *httptest.ResponseRecorder {
 	var buf bytes.Buffer
