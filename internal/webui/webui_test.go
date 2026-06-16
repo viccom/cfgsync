@@ -24,14 +24,16 @@ func TestHandler_ServesIndexOnRoot(t *testing.T) {
 	}
 }
 
-func TestHandler_ServesAssets(t *testing.T) {
+// TestHandler_AssetsMissReturn404 pins the contract that paths under /assets/
+// that don't exist in the embed return 404 (not the SPA index.html fallback).
+// This prevents a typo in a <script src=...> from being silently swallowed.
+func TestHandler_AssetsMissReturn404(t *testing.T) {
 	h := Handler()
-	req := httptest.NewRequest("GET", "/assets/app.css", nil)
+	req := httptest.NewRequest("GET", "/assets/does-not-exist.js", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
-	// app.css is added in Task 9; the test only asserts no 500 / panic.
-	if w.Code == http.StatusInternalServerError {
-		t.Errorf("expected non-500 status, got %d body=%s", w.Code, w.Body.String())
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for missing asset, got %d body=%s", w.Code, w.Body.String())
 	}
 }
 
