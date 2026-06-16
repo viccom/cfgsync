@@ -72,6 +72,39 @@ func TestAdminCreateApp_Duplicate(t *testing.T) {
 	}
 }
 
+func TestAdminCreateApp_RejectsOversizedDisplayName(t *testing.T) {
+	env := newTestEnv(t)
+	adminUID := env.seedUser(t, "admin@example.com", "p12345678", true)
+	tok := env.userToken(adminUID, "admin@example.com", true)
+
+	h := adminChain(env, AdminCreateApp(env.db))
+	body := model.CreateAppRequest{
+		AppID:       "com.foo",
+		DisplayName: strings.Repeat("x", 257),
+	}
+	w := doReq(t, h, "POST", "/api/v1/admin/apps", tok, body)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 on >256-char display_name, got %d", w.Code)
+	}
+}
+
+func TestAdminCreateApp_RejectsOversizedDescription(t *testing.T) {
+	env := newTestEnv(t)
+	adminUID := env.seedUser(t, "admin@example.com", "p12345678", true)
+	tok := env.userToken(adminUID, "admin@example.com", true)
+
+	h := adminChain(env, AdminCreateApp(env.db))
+	body := model.CreateAppRequest{
+		AppID:       "com.foo",
+		DisplayName: "Foo",
+		Description: strings.Repeat("x", 1025),
+	}
+	w := doReq(t, h, "POST", "/api/v1/admin/apps", tok, body)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 on >1024-char description, got %d", w.Code)
+	}
+}
+
 // --- helpers for path-scoped admin endpoints ---
 
 func doAdminGet(h http.Handler, path, token string) *httptest.ResponseRecorder {

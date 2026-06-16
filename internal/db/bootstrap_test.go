@@ -4,7 +4,9 @@ import (
 	"database/sql"
 	"os"
 	"testing"
+	"time"
 
+	"github.com/viccom/cfgsync/internal/auth"
 	"github.com/viccom/cfgsync/internal/config"
 )
 
@@ -68,6 +70,70 @@ func TestBootstrapAdmin_DoesNotOverwrite(t *testing.T) {
 	d.QueryRow(`SELECT password_hash FROM users WHERE email = ?`, cfg.BootstrapAdminEmail).Scan(&secondHash)
 	if firstHash != secondHash {
 		t.Errorf("bootstrap should not overwrite password; hash changed from %q to %q", firstHash, secondHash)
+	}
+}
+
+// If someone pre-registered the bootstrap email as a regular user, BootstrapAdmin
+// should adopt them as admin without changing the password.
+func TestBootstrapAdmin_PromotesExistingNonAdmin(t *testing.T) {
+	d := openTempDB(t)
+
+	// Pre-register the bootstrap email as a regular user.
+	hash, err := auth.HashPassword("user-chosen-password")
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	now := time.Now().Unix()
+	uid := auth.NewID()
+	if _, err := d.Exec(
+		`INSERT INTO users (id, email, password_hash, is_admin, created_at, updated_at) VALUES (?, ?, ?, 0, ?, ?)`,
+		uid, "admin@example.com", hash, now, now,
+	); err != nil {
+		t.Fatalf("seed non-admin: %v", err)
+	}
+
+	cfg := &config.Config{
+		BootstrapAdminEmail:    "admin@example.com",
+		BootstrapAdminPassword: "bootstrap-password-should-be-ignored",
+	}
+	if err := BootstrapAdmin(d, cfg); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	var (
+		gotIsAdmin int
+		gotHash    string
+	)
+	if err := d.QueryRow(
+		`SELECT is_admin, password_hash FROM users WHERE email = ?`, cfg.BootstrapAdminEmail,
+	).Scan(&gotIsAdmin, &gotHash); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if gotIsAdmin != 1 {
+		t.Errorf("expected existing user promoted to admin (is_admin=1), got %d", gotIsAdmin)
+	}
+	if gotHash != hash {
+		t.Errorf("bootstrap must not overwrite password; hash changed")
+	}
+}
+
+// Re-running bootstrap on an already-admin user is a no-op (no error, no row changes).
+func TestBootstrapAdmin_AlreadyAdminIsNoOp(t *testing.T) {
+	d := openTempDB(t)
+	cfg := &config.Config{
+		BootstrapAdminEmail:    "admin@example.com",
+		BootstrapAdminPassword: "p12345678",
+	}
+	if err := BootstrapAdmin(d, cfg); err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	if err := BootstrapAdmin(d, cfg); err != nil {
+		t.Fatalf("second: %v", err)
+	}
+	var n int
+	d.QueryRow(`SELECT COUNT(*) FROM users WHERE email = ?`, cfg.BootstrapAdminEmail).Scan(&n)
+	if n != 1 {
+		t.Errorf("expected 1 row, got %d", n)
 	}
 }
 

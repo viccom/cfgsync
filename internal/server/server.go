@@ -49,7 +49,7 @@ func New(cfg *config.Config, db *sql.DB) http.Handler {
 	mux.Handle("GET /api/v1/apps/{app_id}/config", auth.AppTokenMW(db, handler.GetConfig(db)))
 	mux.Handle("PUT /api/v1/apps/{app_id}/config", auth.AppTokenMW(db, handler.PutConfig(db, cfg)))
 
-	return chain(mux, recoverMW, logMW)
+	return chain(mux, logMW, recoverMW)
 }
 
 // --- middleware ---

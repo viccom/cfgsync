@@ -21,6 +21,14 @@ import (
 //   local.dev.proj
 var appIDRegex = regexp.MustCompile(`^([a-z0-9][a-z0-9-]{1,30}\.)+[a-z0-9][a-z0-9-]{1,30}$`)
 
+// Field length caps for app metadata. Defends against pathological inputs
+// (e.g. 1 MB display_name) that would otherwise be persisted verbatim.
+const (
+	maxAppIDLen      = 64
+	maxDisplayNameLen = 256
+	maxDescriptionLen = 1024
+)
+
 // AdminCreateApp registers a new app_id. Requires admin (enforced by middleware chain).
 func AdminCreateApp(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -30,11 +38,15 @@ func AdminCreateApp(db *sql.DB) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "invalid_json")
 			return
 		}
-		if !appIDRegex.MatchString(req.AppID) || len(req.AppID) > 64 {
+		if !appIDRegex.MatchString(req.AppID) || len(req.AppID) > maxAppIDLen {
 			writeError(w, http.StatusBadRequest, "invalid_app_id")
 			return
 		}
-		if req.DisplayName == "" {
+		if req.DisplayName == "" || len(req.DisplayName) > maxDisplayNameLen {
+			writeError(w, http.StatusBadRequest, "invalid_app_id")
+			return
+		}
+		if len(req.Description) > maxDescriptionLen {
 			writeError(w, http.StatusBadRequest, "invalid_app_id")
 			return
 		}
@@ -156,7 +168,11 @@ func AdminPatchApp(db *sql.DB) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "invalid_json")
 			return
 		}
-		if req.DisplayName != nil && *req.DisplayName == "" {
+		if req.DisplayName != nil && (*req.DisplayName == "" || len(*req.DisplayName) > maxDisplayNameLen) {
+			writeError(w, http.StatusBadRequest, "invalid_app_id")
+			return
+		}
+		if req.Description != nil && len(*req.Description) > maxDescriptionLen {
 			writeError(w, http.StatusBadRequest, "invalid_app_id")
 			return
 		}
@@ -232,8 +248,8 @@ func AdminDeleteApp(db *sql.DB) http.HandlerFunc {
 }
 
 // AdminPromoteUser grants is_admin=1 to another user. Idempotent: promoting an
-// existing admin still succeeds. Unknown user_id -> 404. Self-promote is allowed
-// (already-admin promoting themselves is a no-op that returns 200).
+// existing admin still succeeds (UPDATE matches the row, just sets the same value).
+// Unknown user_id -> 404 via RowsAffected==0 on the UPDATE itself.
 func AdminPromoteUser(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		targetUID := r.PathValue("user_id")
@@ -241,23 +257,17 @@ func AdminPromoteUser(db *sql.DB) http.HandlerFunc {
 			writeError(w, http.StatusBadRequest, "invalid_user_id")
 			return
 		}
-		// Check the user exists first to give a clean 404.
-		var dummy int
-		if err := db.QueryRowContext(r.Context(),
-			`SELECT 1 FROM users WHERE id = ?`, targetUID,
-		).Scan(&dummy); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				writeError(w, http.StatusNotFound, "not_found")
-				return
-			}
+		res, err := db.ExecContext(r.Context(),
+			`UPDATE users SET is_admin = 1, updated_at = ? WHERE id = ?`,
+			time.Now().Unix(), targetUID,
+		)
+		if err != nil {
 			writeError(w, http.StatusInternalServerError, "internal")
 			return
 		}
-		if _, err := db.ExecContext(r.Context(),
-			`UPDATE users SET is_admin = 1, updated_at = ? WHERE id = ?`,
-			time.Now().Unix(), targetUID,
-		); err != nil {
-			writeError(w, http.StatusInternalServerError, "internal")
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			writeError(w, http.StatusNotFound, "not_found")
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]interface{}{

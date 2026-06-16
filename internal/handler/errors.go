@@ -3,7 +3,6 @@ package handler
 
 import (
 	"encoding/json"
-	"log"
 	"net/http"
 )
 
@@ -17,9 +16,4 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 // writeError writes a standard error response.
 func writeError(w http.ResponseWriter, status int, code string) {
 	writeJSON(w, status, map[string]string{"error": code})
-}
-
-// logReq logs request method, path, and status after the handler runs.
-func logReq(r *http.Request, status int) {
-	log.Printf("%s %s -> %d", r.Method, r.URL.Path, status)
 }

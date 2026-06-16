@@ -45,18 +45,35 @@ func Migrate(d *sql.DB) error {
 	return nil
 }
 
-// BootstrapAdmin ensures the bootstrap admin user exists. No-op if env vars are empty.
-// If the email already exists (admin or not), the function does NOT overwrite the password.
+// BootstrapAdmin ensures the bootstrap admin user exists and is an admin.
+// No-op if env vars are empty. Behavior when the email already exists:
+//   - Password is NEVER overwritten (the existing user's credentials stay).
+//   - is_admin is set to 1 if it was 0 (so a pre-registered regular account
+//     can be "adopted" as the bootstrap admin without re-creating it).
+//
+// This prevents the failure mode where someone pre-registers the bootstrap
+// email as a regular user and then deployment cannot bootstrap.
 func BootstrapAdmin(d *sql.DB, cfg *config.Config) error {
 	if cfg.BootstrapAdminEmail == "" || cfg.BootstrapAdminPassword == "" {
 		return nil
 	}
-	var existing string
-	err := d.QueryRow(`SELECT id FROM users WHERE email = ?`, cfg.BootstrapAdminEmail).Scan(&existing)
-	if err == nil {
+
+	var existingID string
+	err := d.QueryRow(`SELECT id FROM users WHERE email = ?`, cfg.BootstrapAdminEmail).Scan(&existingID)
+	switch {
+	case err == nil:
+		// Promote to admin if not already; leave password untouched.
+		_, err := d.Exec(
+			`UPDATE users SET is_admin = 1, updated_at = ? WHERE email = ? AND is_admin = 0`,
+			time.Now().Unix(), cfg.BootstrapAdminEmail,
+		)
+		if err != nil {
+			return fmt.Errorf("bootstrap admin promote: %w", err)
+		}
 		return nil
-	}
-	if err != sql.ErrNoRows {
+	case err == sql.ErrNoRows:
+		// fall through to insert
+	default:
 		return fmt.Errorf("bootstrap admin lookup: %w", err)
 	}
 

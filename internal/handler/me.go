@@ -32,32 +32,6 @@ func CreateAppToken(db *sql.DB, cfg *config.Config) http.HandlerFunc {
 			return
 		}
 
-		// Quota: only NEW (user, app_id) pairs consume a slot. Replacing an
-		// existing token is a no-op on count (DELETE then INSERT).
-		var existingHash string
-		_ = db.QueryRowContext(r.Context(),
-			`SELECT token_hash FROM app_tokens WHERE user_id = ? AND app_id = ?`,
-			uid, appID,
-		).Scan(&existingHash)
-		isReplace := existingHash != ""
-
-		if !isReplace {
-			var count int
-			if err := db.QueryRowContext(r.Context(),
-				`SELECT COUNT(*) FROM app_tokens WHERE user_id = ?`, uid,
-			).Scan(&count); err != nil {
-				writeError(w, http.StatusInternalServerError, "internal")
-				return
-			}
-			if count >= cfg.UserAppTokenLimit {
-				writeJSON(w, http.StatusRequestEntityTooLarge, map[string]interface{}{
-					"error": "app_token_limit_reached",
-					"limit": cfg.UserAppTokenLimit,
-				})
-				return
-			}
-		}
-
 		var req model.CreateAppTokenRequest
 		if r.Body != nil {
 			_ = json.NewDecoder(r.Body).Decode(&req)
@@ -78,6 +52,32 @@ func CreateAppToken(db *sql.DB, cfg *config.Config) http.HandlerFunc {
 			return
 		}
 		defer tx.Rollback()
+
+		// Detect replace vs new inside the tx so the quota check is race-free
+		// (TOCTOU) even if SetMaxOpenConns is raised in the future.
+		var existingHash string
+		_ = tx.QueryRowContext(r.Context(),
+			`SELECT token_hash FROM app_tokens WHERE user_id = ? AND app_id = ?`,
+			uid, appID,
+		).Scan(&existingHash)
+		isReplace := existingHash != ""
+
+		if !isReplace {
+			var count int
+			if err := tx.QueryRowContext(r.Context(),
+				`SELECT COUNT(*) FROM app_tokens WHERE user_id = ?`, uid,
+			).Scan(&count); err != nil {
+				writeError(w, http.StatusInternalServerError, "internal")
+				return
+			}
+			if count >= cfg.UserAppTokenLimit {
+				writeJSON(w, http.StatusRequestEntityTooLarge, map[string]interface{}{
+					"error": "app_token_limit_reached",
+					"limit": cfg.UserAppTokenLimit,
+				})
+				return
+			}
+		}
 
 		if _, err := tx.ExecContext(r.Context(),
 			`DELETE FROM app_tokens WHERE user_id = ? AND app_id = ?`, uid, appID); err != nil {
