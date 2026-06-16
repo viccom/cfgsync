@@ -44,6 +44,7 @@ func New(cfg *config.Config, db *sql.DB) http.Handler {
 	mux.Handle("PATCH /api/v1/admin/apps/{app_id}", adminChain(handler.AdminPatchApp(db)))
 	mux.Handle("DELETE /api/v1/admin/apps/{app_id}", adminChain(handler.AdminDeleteApp(db)))
 	mux.Handle("POST /api/v1/admin/users/{user_id}/promote", adminChain(handler.AdminPromoteUser(db)))
+	mux.Handle("GET /api/v1/admin/users", adminChain(handler.AdminListUsers(db)))
 
 	// App token (AppTokenMW)
 	mux.Handle("GET /api/v1/apps/{app_id}/config", auth.AppTokenMW(db, handler.GetConfig(db)))
