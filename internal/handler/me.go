@@ -79,3 +79,71 @@ func CreateAppToken(db *sql.DB, cfg *config.Config) http.HandlerFunc {
 		})
 	}
 }
+
+// ListMyTokens returns all app_tokens owned by the authenticated user.
+// Token hashes and plaintext are NEVER included; only the public prefix.
+func ListMyTokens(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		uid := auth.UserID(r.Context())
+
+		rows, err := db.QueryContext(r.Context(),
+			`SELECT token_prefix, app_id, label, created_at, last_used_at
+			   FROM app_tokens
+			  WHERE user_id = ?
+			  ORDER BY created_at DESC`, uid)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal")
+			return
+		}
+		defer rows.Close()
+
+		tokens := make([]model.AppTokenInfo, 0)
+		for rows.Next() {
+			var info model.AppTokenInfo
+			var lastUsed sql.NullInt64
+			if err := rows.Scan(&info.TokenPrefix, &info.AppID, &info.Label, &info.CreatedAt, &lastUsed); err != nil {
+				writeError(w, http.StatusInternalServerError, "internal")
+				return
+			}
+			if lastUsed.Valid {
+				info.LastUsedAt = lastUsed.Int64
+			}
+			tokens = append(tokens, info)
+		}
+		if err := rows.Err(); err != nil {
+			writeError(w, http.StatusInternalServerError, "internal")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"tokens": tokens,
+		})
+	}
+}
+
+// DeleteAppToken revokes one of the user's app tokens, identified by token_prefix.
+// prefix is the first 12 chars of the plaintext token (the only stable identifier
+// a client can store without keeping the plaintext secret).
+func DeleteAppToken(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		uid := auth.UserID(r.Context())
+		prefix := r.PathValue("token_prefix")
+		if prefix == "" {
+			writeError(w, http.StatusBadRequest, "invalid_token_prefix")
+			return
+		}
+
+		res, err := db.ExecContext(r.Context(),
+			`DELETE FROM app_tokens WHERE user_id = ? AND token_prefix = ?`,
+			uid, prefix)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal")
+			return
+		}
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			writeError(w, http.StatusNotFound, "not_found")
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}

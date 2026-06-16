@@ -93,3 +93,157 @@ func doPostAppToken(h http.Handler, appID, token string, body interface{}) *http
 	h.ServeHTTP(w, req)
 	return w
 }
+
+// doGetReq performs a GET with optional Bearer token (no body).
+func doGetReq(h http.Handler, path, token string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest("GET", path, &bytes.Buffer{})
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	return w
+}
+
+// doDeletePath performs DELETE with a path value set (no body).
+func doDeletePath(h http.Handler, path, pathKey, pathVal, token string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest("DELETE", path, &bytes.Buffer{})
+	req.SetPathValue(pathKey, pathVal)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	return w
+}
+
+func TestListMyTokens_ReturnsOnlyMine(t *testing.T) {
+	env := newTestEnv(t)
+	adminUID := env.seedUser(t, "admin@example.com", "p12345678", true)
+	env.seedApp(t, "com.foo", "Foo", adminUID)
+	env.seedApp(t, "com.bar", "Bar", adminUID)
+
+	uid := env.seedUser(t, "u@example.com", "p12345678", false)
+	tok := env.userToken(uid, "u@example.com", false)
+
+	createH := auth.UserMW(env.cfg.JWTSecret, CreateAppToken(env.db, env.cfg))
+	doPostAppToken(createH, "com.foo", tok, map[string]interface{}{"label": "MBA"})
+	doPostAppToken(createH, "com.bar", tok, map[string]interface{}{"label": "Desktop"})
+
+	// Seed a token for a DIFFERENT user that should NOT appear in uid's list.
+	otherUID := env.seedUser(t, "other@example.com", "p12345678", false)
+	now := nowUnix()
+	if _, err := env.db.Exec(
+		`INSERT INTO app_tokens (token_hash, token_prefix, user_id, app_id, label, created_at)
+		 VALUES ('deadbeef', '1rc_otheruser', ?, 'com.foo', 'not-yours', ?)`,
+		otherUID, now,
+	); err != nil {
+		t.Fatalf("seed other user token: %v", err)
+	}
+
+	h := auth.UserMW(env.cfg.JWTSecret, ListMyTokens(env.db))
+	w := doGetReq(h, "/api/v1/me/tokens", tok)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `"label":"MBA"`) {
+		t.Errorf("expected MBA label in %s", body)
+	}
+	if !strings.Contains(body, `"label":"Desktop"`) {
+		t.Errorf("expected Desktop label in %s", body)
+	}
+	if strings.Contains(body, `"not-yours"`) {
+		t.Errorf("other user's token leaked into list: %s", body)
+	}
+	// Must never expose plaintext or hash.
+	if strings.Contains(body, `"token":"`) {
+		t.Errorf("plaintext token field should not appear: %s", body)
+	}
+	if strings.Contains(body, `"token_hash"`) {
+		t.Errorf("token_hash field should not appear: %s", body)
+	}
+}
+
+func TestDeleteAppToken_Success(t *testing.T) {
+	env := newTestEnv(t)
+	adminUID := env.seedUser(t, "admin@example.com", "p12345678", true)
+	env.seedApp(t, "com.foo", "Foo", adminUID)
+
+	uid := env.seedUser(t, "u@example.com", "p12345678", false)
+	tok := env.userToken(uid, "u@example.com", false)
+
+	createH := auth.UserMW(env.cfg.JWTSecret, CreateAppToken(env.db, env.cfg))
+	resp := doPostAppToken(createH, "com.foo", tok, map[string]interface{}{"label": "MBA"})
+	_, after, _ := strings.Cut(resp.Body.String(), `"token":"`)
+	plaintext, _, _ := strings.Cut(after, `"`)
+	prefix := plaintext[:12]
+
+	deleteH := auth.UserMW(env.cfg.JWTSecret, DeleteAppToken(env.db))
+	w := doDeletePath(deleteH, "/api/v1/me/tokens/"+prefix, "token_prefix", prefix, tok)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	var n int
+	env.db.QueryRow(`SELECT COUNT(*) FROM app_tokens WHERE user_id = ?`, uid).Scan(&n)
+	if n != 0 {
+		t.Errorf("expected 0 tokens after delete, got %d", n)
+	}
+}
+
+func TestDeleteAppToken_NotFound(t *testing.T) {
+	env := newTestEnv(t)
+	uid := env.seedUser(t, "u@example.com", "p12345678", false)
+	tok := env.userToken(uid, "u@example.com", false)
+
+	h := auth.UserMW(env.cfg.JWTSecret, DeleteAppToken(env.db))
+	w := doDeletePath(h, "/api/v1/me/tokens/1rc_nonexist", "token_prefix", "1rc_nonexist", tok)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d", w.Code)
+	}
+}
+
+func TestDeleteAppToken_DoesNotDeleteOtherUsers(t *testing.T) {
+	env := newTestEnv(t)
+	adminUID := env.seedUser(t, "admin@example.com", "p12345678", true)
+	env.seedApp(t, "com.foo", "Foo", adminUID)
+
+	uid := env.seedUser(t, "u@example.com", "p12345678", false)
+	tok := env.userToken(uid, "u@example.com", false)
+
+	// Two users, each with a token sharing the same prefix (simulated collision).
+	now := nowUnix()
+	if _, err := env.db.Exec(
+		`INSERT INTO app_tokens (token_hash, token_prefix, user_id, app_id, label, created_at)
+		 VALUES ('h1', '1rc_collision', ?, 'com.foo', 'mine', ?)`,
+		uid, now,
+	); err != nil {
+		t.Fatalf("seed mine: %v", err)
+	}
+	otherUID := env.seedUser(t, "other@example.com", "p12345678", false)
+	if _, err := env.db.Exec(
+		`INSERT INTO app_tokens (token_hash, token_prefix, user_id, app_id, label, created_at)
+		 VALUES ('h2', '1rc_collision', ?, 'com.foo', 'theirs', ?)`,
+		otherUID, now,
+	); err != nil {
+		t.Fatalf("seed theirs: %v", err)
+	}
+
+	h := auth.UserMW(env.cfg.JWTSecret, DeleteAppToken(env.db))
+	w := doDeletePath(h, "/api/v1/me/tokens/1rc_collision", "token_prefix", "1rc_collision", tok)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d", w.Code)
+	}
+
+	// Mine should be gone, theirs should remain.
+	var mineCount, theirsCount int
+	env.db.QueryRow(`SELECT COUNT(*) FROM app_tokens WHERE user_id = ? AND token_prefix = '1rc_collision'`, uid).Scan(&mineCount)
+	env.db.QueryRow(`SELECT COUNT(*) FROM app_tokens WHERE user_id = ? AND token_prefix = '1rc_collision'`, otherUID).Scan(&theirsCount)
+	if mineCount != 0 {
+		t.Errorf("expected my token deleted, got %d", mineCount)
+	}
+	if theirsCount != 1 {
+		t.Errorf("other user's token should be untouched, got %d", theirsCount)
+	}
+}
