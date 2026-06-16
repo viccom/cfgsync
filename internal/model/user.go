@@ -9,3 +9,12 @@ type User struct {
 	CreatedAt    int64  `json:"created_at"`
 	UpdatedAt    int64  `json:"updated_at"`
 }
+
+// AdminUserInfo is the public-safe user summary returned by admin listing endpoints.
+// password_hash is never included.
+type AdminUserInfo struct {
+	ID        string `json:"id"`
+	Email     string `json:"email"`
+	IsAdmin   bool   `json:"is_admin"`
+	CreatedAt int64  `json:"created_at"`
+}
