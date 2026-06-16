@@ -45,6 +45,14 @@ func PutConfig(db *sql.DB, cfg *config.Config) http.HandlerFunc {
 
 		var req model.PutConfigRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			var maxBytesErr *http.MaxBytesError
+			if errors.As(err, &maxBytesErr) {
+				writeJSON(w, http.StatusRequestEntityTooLarge, map[string]interface{}{
+					"error":     "payload_too_large",
+					"max_bytes": cfg.MaxPayloadBytes,
+				})
+				return
+			}
 			writeError(w, http.StatusBadRequest, "invalid_json")
 			return
 		}

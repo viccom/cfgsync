@@ -12,11 +12,11 @@ import (
 )
 
 // appIDRegex enforces reverse-domain style: two or more dot-separated segments,
-// each starting with [a-z] and containing [a-z0-9-]. Examples:
+// each starting with [a-z0-9] and containing [a-z0-9-]. Examples:
 //   com.1remote.desktop
 //   io.github.someuser.my-tool
 //   local.dev.proj
-var appIDRegex = regexp.MustCompile(`^([a-z][a-z0-9-]{1,30}\.)+[a-z][a-z0-9-]{1,30}$`)
+var appIDRegex = regexp.MustCompile(`^([a-z0-9][a-z0-9-]{1,30}\.)+[a-z0-9][a-z0-9-]{1,30}$`)
 
 // AdminCreateApp registers a new app_id. Requires admin (enforced by middleware chain).
 func AdminCreateApp(db *sql.DB) http.HandlerFunc {

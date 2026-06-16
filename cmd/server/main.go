@@ -34,6 +34,13 @@ func main() {
 		log.Fatalf("migrate: %v", err)
 	}
 
+	if err := db.BootstrapAdmin(database, cfg); err != nil {
+		log.Fatalf("bootstrap admin: %v", err)
+	}
+	if cfg.BootstrapAdminEmail != "" {
+		log.Printf("bootstrap admin ensured: %s", cfg.BootstrapAdminEmail)
+	}
+
 	srv := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           server.New(cfg, database),

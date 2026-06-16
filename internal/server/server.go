@@ -1,7 +1,4 @@
 // Package server wires routing and middleware.
-//
-// Temporary stub during multi-app MVP rollout: only health is wired here.
-// Full route table is re-installed in Task 10 of the MVP plan.
 package server
 
 import (
@@ -10,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/1remote/1remote-cloud/internal/auth"
 	"github.com/1remote/1remote-cloud/internal/config"
 	"github.com/1remote/1remote-cloud/internal/handler"
 )
@@ -17,7 +15,31 @@ import (
 // New builds the top-level HTTP handler.
 func New(cfg *config.Config, db *sql.DB) http.Handler {
 	mux := http.NewServeMux()
+
+	// Public
 	mux.HandleFunc("GET /api/v1/health", handler.Health(db))
+
+	// Credential (body auth, no middleware)
+	mux.HandleFunc("POST /api/v1/auth/register", handler.Register(db, cfg))
+	mux.HandleFunc("POST /api/v1/auth/login", handler.Login(db, cfg))
+	mux.HandleFunc("POST /api/v1/auth/refresh", handler.Refresh(db, cfg))
+
+	// User token (UserMW)
+	mux.Handle("POST /api/v1/auth/logout", auth.UserMW(cfg.JWTSecret, handler.Logout(db)))
+	mux.Handle("GET /api/v1/apps", auth.UserMW(cfg.JWTSecret, handler.ListApps(db)))
+	mux.Handle("GET /api/v1/apps/{app_id}", auth.UserMW(cfg.JWTSecret, handler.GetApp(db)))
+	mux.Handle("POST /api/v1/me/apps/{app_id}/token", auth.UserMW(cfg.JWTSecret, handler.CreateAppToken(db, cfg)))
+
+	// Admin (UserMW + AdminMW)
+	adminChain := func(h http.Handler) http.Handler {
+		return auth.UserMW(cfg.JWTSecret, auth.AdminMW(h))
+	}
+	mux.Handle("POST /api/v1/admin/apps", adminChain(handler.AdminCreateApp(db)))
+
+	// App token (AppTokenMW)
+	mux.Handle("GET /api/v1/apps/{app_id}/config", auth.AppTokenMW(db, handler.GetConfig(db)))
+	mux.Handle("PUT /api/v1/apps/{app_id}/config", auth.AppTokenMW(db, handler.PutConfig(db, cfg)))
+
 	return chain(mux, recoverMW, logMW)
 }
 
