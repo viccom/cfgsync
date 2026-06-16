@@ -276,3 +276,48 @@ func AdminPromoteUser(db *sql.DB) http.HandlerFunc {
 		})
 	}
 }
+
+// AdminListUsers returns a paginated list of all users (admin only).
+// Default limit 20, max 100. Never includes password_hash.
+func AdminListUsers(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		if limit <= 0 || limit > 100 {
+			limit = 20
+		}
+		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+		if offset < 0 {
+			offset = 0
+		}
+
+		rows, err := db.QueryContext(r.Context(),
+			`SELECT id, email, is_admin, created_at FROM users
+			  ORDER BY created_at DESC LIMIT ? OFFSET ?`, limit, offset)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal")
+			return
+		}
+		defer rows.Close()
+
+		users := make([]model.AdminUserInfo, 0, limit)
+		for rows.Next() {
+			var u model.AdminUserInfo
+			var adm int
+			if err := rows.Scan(&u.ID, &u.Email, &adm, &u.CreatedAt); err != nil {
+				writeError(w, http.StatusInternalServerError, "internal")
+				return
+			}
+			u.IsAdmin = adm == 1
+			users = append(users, u)
+		}
+		if err := rows.Err(); err != nil {
+			writeError(w, http.StatusInternalServerError, "internal")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"users":  users,
+			"limit":  limit,
+			"offset": offset,
+		})
+	}
+}
