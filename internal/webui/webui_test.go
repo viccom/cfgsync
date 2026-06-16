@@ -78,3 +78,29 @@ func TestHandler_UnknownPathFallbacksToIndex(t *testing.T) {
 		t.Errorf("read body: %v", err)
 	}
 }
+
+// TestHandler_ServesEmbeddedAsset covers the real asset-serve path with a file
+// that actually exists in the embed. This is the regression test for the
+// nil-pointer panic in serveFile (when embed.FS files don't implement Seek).
+// It will fail loudly if serveFile ever regresses to requiring an io.Seeker
+// without a fallback.
+func TestHandler_ServesEmbeddedAsset(t *testing.T) {
+	h := Handler()
+	req := httptest.NewRequest("GET", "/assets/app.css", nil)
+	w := httptest.NewRecorder()
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("handler panicked serving real asset: %v", r)
+		}
+	}()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", w.Code, w.Body.String())
+	}
+	if ct := w.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/css") {
+		t.Errorf("expected text/css, got %q", ct)
+	}
+	if !strings.Contains(w.Body.String(), "--primary") {
+		t.Errorf("expected CSS body to contain a CSS variable, got %s", w.Body.String()[:min(200, len(w.Body.String()))])
+	}
+}

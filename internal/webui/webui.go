@@ -38,7 +38,7 @@ func Handler() http.Handler {
 		f, err := sub.Open(path)
 		if err == nil {
 			defer f.Close()
-			serveFile(w, f)
+			serveFile(w, r, f)
 			return
 		}
 		// Asset miss → 404 (don't serve HTML where JS/CSS is expected).
@@ -62,17 +62,43 @@ func serveIndex(w http.ResponseWriter, sub fs.FS) {
 	_, _ = io.Copy(w, f)
 }
 
-func serveFile(w http.ResponseWriter, f fs.File) {
+func serveFile(w http.ResponseWriter, r *http.Request, f fs.File) {
 	stat, err := f.Stat()
 	if err != nil {
 		http.Error(w, "stat", http.StatusInternalServerError)
 		return
 	}
-	rs, ok := f.(io.ReadSeeker)
-	if !ok {
-		http.Error(w, "not seekable", http.StatusInternalServerError)
+	// http.ServeContent needs an io.ReadSeeker; embed.FS files may or may not
+	// implement Seek (it's optional in fs.File). Fall back to io.Copy if not.
+	if rs, ok := f.(io.ReadSeeker); ok {
+		http.ServeContent(w, r, stat.Name(), stat.ModTime(), rs)
 		return
 	}
-	// http.ServeContent handles Content-Type sniffing, Range requests, and Last-Modified.
-	http.ServeContent(w, nil, stat.Name(), stat.ModTime(), rs)
+	// No seeker — set Content-Type from extension (best effort) and stream.
+	if !strings.HasPrefix(w.Header().Get("Content-Type"), "text/") &&
+		!strings.HasPrefix(w.Header().Get("Content-Type"), "application/") {
+		w.Header().Set("Content-Type", mimeTypeByExt(stat.Name()))
+	}
+	_, _ = io.Copy(w, f)
+}
+
+func mimeTypeByExt(name string) string {
+	switch {
+	case strings.HasSuffix(name, ".html"):
+		return "text/html; charset=utf-8"
+	case strings.HasSuffix(name, ".css"):
+		return "text/css; charset=utf-8"
+	case strings.HasSuffix(name, ".js"):
+		return "application/javascript; charset=utf-8"
+	case strings.HasSuffix(name, ".json"):
+		return "application/json; charset=utf-8"
+	case strings.HasSuffix(name, ".svg"):
+		return "image/svg+xml"
+	case strings.HasSuffix(name, ".png"):
+		return "image/png"
+	case strings.HasSuffix(name, ".ico"):
+		return "image/x-icon"
+	default:
+		return "application/octet-stream"
+	}
 }
