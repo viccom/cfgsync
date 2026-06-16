@@ -36,6 +36,12 @@ func Handler() http.Handler {
 			files.ServeHTTP(w, r)
 			return
 		}
+		// Paths under assets/ that miss → 404 (don't SPA-fallback, since the browser
+		// would try to parse index.html as a script/stylesheet and produce a confusing error).
+		if strings.HasPrefix(path, "assets/") {
+			http.NotFound(w, r)
+			return
+		}
 		// Unknown path → SPA fallback so client-side routes work on direct hit / refresh.
 		serveIndex(w, sub)
 	})
