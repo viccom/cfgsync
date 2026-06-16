@@ -77,15 +77,48 @@ func PutConfig(db *sql.DB, cfg *config.Config) http.HandlerFunc {
 		}
 		defer tx.Rollback()
 
-		var current int64
+		var (
+			current      int64
+			oldPayload   string
+			oldPayloadOk bool
+		)
 		row := tx.QueryRowContext(r.Context(),
-			`SELECT version FROM configs WHERE user_id = ? AND app_id = ?`, at.UserID, at.AppID)
+			`SELECT version, payload FROM configs WHERE user_id = ? AND app_id = ?`, at.UserID, at.AppID)
+		switch err := row.Scan(&current, &oldPayload); {
+		case errors.Is(err, sql.ErrNoRows):
+			// oldPayloadOk stays false; oldPayload stays "".
+		case err != nil:
+			writeError(w, http.StatusInternalServerError, "internal")
+			return
+		default:
+			oldPayloadOk = true
+		}
+
+		// Storage-quota check: total user bytes after this write must stay under limit.
+		// force bypasses the version check, NOT the quota (resource ceiling is not negotiable).
+		var currentTotal int64
+		if err := tx.QueryRowContext(r.Context(),
+			`SELECT COALESCE(SUM(LENGTH(payload)), 0) FROM configs WHERE user_id = ?`,
+			at.UserID,
+		).Scan(&currentTotal); err != nil {
+			writeError(w, http.StatusInternalServerError, "internal")
+			return
+		}
+		oldLen := int64(len(oldPayload)) // 0 when no existing row
+		newTotal := currentTotal - oldLen + int64(len(req.Payload))
+		if newTotal > cfg.UserStorageLimit {
+			writeJSON(w, http.StatusRequestEntityTooLarge, map[string]interface{}{
+				"error":       "storage_quota_exceeded",
+				"used_bytes":  currentTotal,
+				"limit_bytes": cfg.UserStorageLimit,
+			})
+			return
+		}
 
 		now := time.Now().Unix()
 		var newVer int64
 
-		switch err := row.Scan(&current); {
-		case errors.Is(err, sql.ErrNoRows):
+		if !oldPayloadOk {
 			if req.Version != 0 && !force {
 				writeConflict(w, tx, at.UserID, at.AppID)
 				return
@@ -97,12 +130,7 @@ func PutConfig(db *sql.DB, cfg *config.Config) http.HandlerFunc {
 				return
 			}
 			newVer = 1
-
-		case err != nil:
-			writeError(w, http.StatusInternalServerError, "internal")
-			return
-
-		default:
+		} else {
 			if req.Version != current && !force {
 				writeConflict(w, tx, at.UserID, at.AppID)
 				return

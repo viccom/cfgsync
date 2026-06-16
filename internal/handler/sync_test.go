@@ -146,3 +146,85 @@ func TestPutConfig_TooLarge_Returns413(t *testing.T) {
 		t.Errorf("expected 413, got %d body=%s", w.Code, w.Body.String())
 	}
 }
+
+func TestPutConfig_StorageQuota_AtLimit_Ok(t *testing.T) {
+	env := newTestEnv(t)
+	env.cfg.UserStorageLimit = 20 // tiny for test
+	uid := env.seedUser(t, "u@example.com", "password123", false)
+	tok := env.seedAppTokenFor(t, uid, "com.foo", "")
+
+	// 20 bytes exactly: should fit.
+	h := auth.AppTokenMW(env.db, PutConfig(env.db, env.cfg))
+	w := doAppTokenReq(t, h, "PUT", "/api/v1/apps/com.foo/config", "com.foo", tok,
+		map[string]interface{}{"version": 0, "payload": strings.Repeat("x", 20), "updated_by": "MBA"})
+	if w.Code != 200 {
+		t.Fatalf("expected 200 at limit, got %d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestPutConfig_StorageQuota_OverLimit_Returns413(t *testing.T) {
+	env := newTestEnv(t)
+	env.cfg.UserStorageLimit = 20
+	uid := env.seedUser(t, "u@example.com", "password123", false)
+	tok := env.seedAppTokenFor(t, uid, "com.foo", "")
+
+	h := auth.AppTokenMW(env.db, PutConfig(env.db, env.cfg))
+	w := doAppTokenReq(t, h, "PUT", "/api/v1/apps/com.foo/config", "com.foo", tok,
+		map[string]interface{}{"version": 0, "payload": strings.Repeat("x", 21), "updated_by": "MBA"})
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413, got %d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"error":"storage_quota_exceeded"`) {
+		t.Errorf("expected storage_quota_exceeded in %s", w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"limit_bytes":20`) {
+		t.Errorf("expected limit_bytes:20 in %s", w.Body.String())
+	}
+}
+
+func TestPutConfig_StorageQuota_ShrinkingDoesNotTrigger(t *testing.T) {
+	env := newTestEnv(t)
+	env.cfg.UserStorageLimit = 20
+	uid := env.seedUser(t, "u@example.com", "password123", false)
+	tok := env.seedAppTokenFor(t, uid, "com.foo", "")
+
+	// First write: 20 bytes (at limit).
+	h := auth.AppTokenMW(env.db, PutConfig(env.db, env.cfg))
+	w1 := doAppTokenReq(t, h, "PUT", "/api/v1/apps/com.foo/config", "com.foo", tok,
+		map[string]interface{}{"version": 0, "payload": strings.Repeat("x", 20), "updated_by": "MBA"})
+	if w1.Code != 200 {
+		t.Fatalf("seed write: %d body=%s", w1.Code, w1.Body.String())
+	}
+
+	// Shrink to 5 bytes: must succeed (delta negative).
+	w2 := doAppTokenReq(t, h, "PUT", "/api/v1/apps/com.foo/config", "com.foo", tok,
+		map[string]interface{}{"version": 1, "payload": "abcde", "updated_by": "MBA"})
+	if w2.Code != 200 {
+		t.Errorf("expected 200 on shrink, got %d body=%s", w2.Code, w2.Body.String())
+	}
+
+	// Now grow back to 21: should fail.
+	w3 := doAppTokenReq(t, h, "PUT", "/api/v1/apps/com.foo/config", "com.foo", tok,
+		map[string]interface{}{"version": 2, "payload": strings.Repeat("x", 21), "updated_by": "MBA"})
+	if w3.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("expected 413 when growing past limit, got %d body=%s", w3.Code, w3.Body.String())
+	}
+}
+
+func TestPutConfig_StorageQuota_ForceDoesNotBypass(t *testing.T) {
+	env := newTestEnv(t)
+	env.cfg.UserStorageLimit = 20
+	uid := env.seedUser(t, "u@example.com", "password123", false)
+	tok := env.seedAppTokenFor(t, uid, "com.foo", "")
+
+	// Force cannot push past the storage quota.
+	h := auth.AppTokenMW(env.db, PutConfig(env.db, env.cfg))
+	w := doAppTokenReq(t, h, "PUT", "/api/v1/apps/com.foo/config?force=true", "com.foo", tok,
+		map[string]interface{}{"version": 0, "payload": strings.Repeat("x", 21), "updated_by": "MBA"})
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("expected 413 even with force, got %d body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"storage_quota_exceeded"`) {
+		t.Errorf("expected storage_quota_exceeded in %s", w.Body.String())
+	}
+}
