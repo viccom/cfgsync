@@ -38,7 +38,12 @@ func New(cfg *config.Config, db *sql.DB) http.Handler {
 	adminChain := func(h http.Handler) http.Handler {
 		return auth.UserMW(cfg.JWTSecret, auth.AdminMW(h))
 	}
+	mux.Handle("GET /api/v1/admin/apps", adminChain(handler.AdminListApps(db)))
 	mux.Handle("POST /api/v1/admin/apps", adminChain(handler.AdminCreateApp(db)))
+	mux.Handle("GET /api/v1/admin/apps/{app_id}", adminChain(handler.AdminGetApp(db)))
+	mux.Handle("PATCH /api/v1/admin/apps/{app_id}", adminChain(handler.AdminPatchApp(db)))
+	mux.Handle("DELETE /api/v1/admin/apps/{app_id}", adminChain(handler.AdminDeleteApp(db)))
+	mux.Handle("POST /api/v1/admin/users/{user_id}/promote", adminChain(handler.AdminPromoteUser(db)))
 
 	// App token (AppTokenMW)
 	mux.Handle("GET /api/v1/apps/{app_id}/config", auth.AppTokenMW(db, handler.GetConfig(db)))
