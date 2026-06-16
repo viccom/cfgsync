@@ -1,9 +1,7 @@
 package handler
 
 import (
-	"crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -15,39 +13,38 @@ import (
 	"github.com/1remote/1remote-cloud/internal/model"
 )
 
-// Register creates a new user and returns tokens.
+// Register creates a new user (non-admin by default) and returns tokens.
 func Register(db *sql.DB, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req model.RegisterRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid json")
+			writeError(w, http.StatusBadRequest, "invalid_json")
 			return
 		}
 		req.Email = strings.TrimSpace(strings.ToLower(req.Email))
 		if !validEmail(req.Email) || len(req.Password) < 8 {
-			writeError(w, http.StatusBadRequest, "invalid email or password too short (>=8)")
+			writeError(w, http.StatusBadRequest, "invalid_email_or_password")
 			return
 		}
-
 		hash, err := auth.HashPassword(req.Password)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "hash failed")
+			writeError(w, http.StatusInternalServerError, "internal")
 			return
 		}
-		uid := newID()
+		uid := auth.NewID()
 		now := time.Now().Unix()
 		_, err = db.ExecContext(r.Context(),
-			`INSERT INTO users (id, email, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
+			`INSERT INTO users (id, email, password_hash, is_admin, created_at, updated_at) VALUES (?, ?, ?, 0, ?, ?)`,
 			uid, req.Email, hash, now, now)
 		if err != nil {
 			if isUniqueViolation(err) {
-				writeError(w, http.StatusConflict, "email already registered")
+				writeError(w, http.StatusConflict, "email_already_registered")
 				return
 			}
-			writeError(w, http.StatusInternalServerError, "db error")
+			writeError(w, http.StatusInternalServerError, "internal")
 			return
 		}
-		issueAndRespond(w, db, r, cfg, uid, req.Email)
+		issueAndRespond(w, db, r, cfg, uid, req.Email, false)
 	}
 }
 
@@ -56,78 +53,82 @@ func Login(db *sql.DB, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req model.LoginRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid json")
+			writeError(w, http.StatusBadRequest, "invalid_json")
 			return
 		}
 		email := strings.TrimSpace(strings.ToLower(req.Email))
 		if !validEmail(email) || req.Password == "" {
-			writeError(w, http.StatusBadRequest, "invalid email or password")
+			writeError(w, http.StatusBadRequest, "invalid_email_or_password")
 			return
 		}
 		var (
-			uid  string
-			hash string
+			uid     string
+			hash    string
+			isAdmin bool
 		)
 		err := db.QueryRowContext(r.Context(),
-			`SELECT id, password_hash FROM users WHERE email = ?`, email,
-		).Scan(&uid, &hash)
+			`SELECT id, password_hash, is_admin FROM users WHERE email = ?`, email,
+		).Scan(&uid, &hash, &isAdmin)
 		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusUnauthorized, "invalid credentials")
+			writeError(w, http.StatusUnauthorized, "invalid_credentials")
 			return
 		}
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "db error")
+			writeError(w, http.StatusInternalServerError, "internal")
 			return
 		}
 		if err := auth.VerifyPassword(hash, req.Password); err != nil {
-			writeError(w, http.StatusUnauthorized, "invalid credentials")
+			writeError(w, http.StatusUnauthorized, "invalid_credentials")
 			return
 		}
-		issueAndRespond(w, db, r, cfg, uid, email)
+		issueAndRespond(w, db, r, cfg, uid, email, isAdmin)
 	}
 }
 
-// Refresh exchanges a valid refresh token for a new access + refresh pair.
+// Refresh exchanges a valid refresh token for a new pair (and revokes the old one).
 func Refresh(db *sql.DB, cfg *config.Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req model.RefreshRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.RefreshToken == "" {
-			writeError(w, http.StatusBadRequest, "invalid json")
+			writeError(w, http.StatusBadRequest, "invalid_json")
 			return
 		}
 		var (
 			uid       string
 			email     string
+			isAdmin   bool
 			expiresAt int64
 			revoked   *int64
 		)
 		err := db.QueryRowContext(r.Context(),
-			`SELECT u.id, u.email, rt.expires_at, rt.revoked_at
+			`SELECT u.id, u.email, u.is_admin, rt.expires_at, rt.revoked_at
 			   FROM refresh_tokens rt JOIN users u ON u.id = rt.user_id
 			  WHERE rt.id = ?`, req.RefreshToken,
-		).Scan(&uid, &email, &expiresAt, &revoked)
+		).Scan(&uid, &email, &isAdmin, &expiresAt, &revoked)
 		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusUnauthorized, "invalid refresh token")
+			writeError(w, http.StatusUnauthorized, "invalid_refresh_token")
 			return
 		}
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "db error")
+			writeError(w, http.StatusInternalServerError, "internal")
 			return
 		}
 		if revoked != nil || expiresAt < time.Now().Unix() {
-			writeError(w, http.StatusUnauthorized, "refresh expired or revoked")
+			writeError(w, http.StatusUnauthorized, "invalid_refresh_token")
 			return
 		}
-		issueAndRespond(w, db, r, cfg, uid, email)
+		_, _ = db.ExecContext(r.Context(),
+			`UPDATE refresh_tokens SET revoked_at = ? WHERE id = ?`,
+			time.Now().Unix(), req.RefreshToken)
+		issueAndRespond(w, db, r, cfg, uid, email, isAdmin)
 	}
 }
 
-// Logout revokes the current refresh token.
+// Logout revokes the refresh token in the body. Requires user token (UserMW).
 func Logout(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req model.RefreshRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.RefreshToken == "" {
-			// If no body, treat as best-effort success.
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -135,7 +136,7 @@ func Logout(db *sql.DB) http.HandlerFunc {
 			`UPDATE refresh_tokens SET revoked_at = ? WHERE id = ?`,
 			time.Now().Unix(), req.RefreshToken)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "db error")
+			writeError(w, http.StatusInternalServerError, "internal")
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -144,19 +145,19 @@ func Logout(db *sql.DB) http.HandlerFunc {
 
 // --- helpers ---
 
-func issueAndRespond(w http.ResponseWriter, db *sql.DB, r *http.Request, cfg *config.Config, uid, email string) {
-	access, err := auth.IssueAccess(cfg.JWTSecret, uid, email, false, cfg.AccessTTL)
+func issueAndRespond(w http.ResponseWriter, db *sql.DB, r *http.Request, cfg *config.Config, uid, email string, isAdmin bool) {
+	access, err := auth.IssueAccess(cfg.JWTSecret, uid, email, isAdmin, cfg.AccessTTL)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "issue access failed")
+		writeError(w, http.StatusInternalServerError, "internal")
 		return
 	}
-	refresh := newID()
+	refresh := auth.NewID()
 	now := time.Now().Unix()
 	_, err = db.ExecContext(r.Context(),
 		`INSERT INTO refresh_tokens (id, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)`,
 		refresh, uid, now+int64(cfg.RefreshTTL.Seconds()), now)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "issue refresh failed")
+		writeError(w, http.StatusInternalServerError, "internal")
 		return
 	}
 	writeJSON(w, http.StatusOK, model.AuthResponse{
@@ -165,12 +166,6 @@ func issueAndRespond(w http.ResponseWriter, db *sql.DB, r *http.Request, cfg *co
 		TokenType:    "Bearer",
 		ExpiresIn:    int64(cfg.AccessTTL.Seconds()),
 	})
-}
-
-func newID() string {
-	var b [16]byte
-	_, _ = rand.Read(b[:])
-	return hex.EncodeToString(b[:])
 }
 
 func validEmail(s string) bool {
