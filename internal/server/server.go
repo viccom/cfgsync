@@ -91,6 +91,11 @@ func recoverMW(next http.Handler) http.Handler {
 	})
 }
 
+// chain wraps h with the given middlewares. chain(h, A, B) returns A(B(h)) —
+// the first middleware is the OUTERMOST (runs first on the request path).
+// Use this ordering when reasoning about panic recovery vs. logging:
+// chain(mux, logMW, recoverMW) = logMW(recoverMW(mux)), so recover catches
+// handler panics and writes 500 BEFORE logMW observes the status.
 func chain(h http.Handler, mws ...func(http.Handler) http.Handler) http.Handler {
 	for i := len(mws) - 1; i >= 0; i-- {
 		h = mws[i](h)

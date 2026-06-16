@@ -1,4 +1,4 @@
-// Command server is the entry point for the 1Remote-Cloud backend.
+// Command server is the entry point for the cfgsync backend.
 package main
 
 import (
@@ -52,7 +52,7 @@ func main() {
 
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf("1remote-cloud listening on %s db=%s", cfg.Listen, cfg.DBPath)
+		log.Printf("cfgsync listening on=%s db=%s", cfg.Listen, cfg.DBPath)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}

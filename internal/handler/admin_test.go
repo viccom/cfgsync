@@ -332,7 +332,7 @@ func TestAdminDeleteApp_CascadesUserData(t *testing.T) {
 	// FK ON DELETE CASCADE should have wiped everything.
 	for _, table := range []string{"apps", "configs", "config_history", "app_tokens"} {
 		var n int
-		env.db.QueryRow(`SELECT COUNT(*) FROM `+table+` WHERE app_id = 'com.foo'`).Scan(&n)
+		env.db.QueryRow(`SELECT COUNT(*) FROM ` + table + ` WHERE app_id = 'com.foo'`).Scan(&n)
 		if n != 0 {
 			t.Errorf("expected %s to be empty for com.foo after delete, got %d", table, n)
 		}

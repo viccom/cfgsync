@@ -15,16 +15,15 @@ import (
 )
 
 // appIDRegex enforces reverse-domain style: two or more dot-separated segments,
-// each starting with [a-z0-9] and containing [a-z0-9-]. Examples:
-//   com.1remote.desktop
-//   io.github.someuser.my-tool
-//   local.dev.proj
+// each starting with [a-z0-9] and containing [a-z0-9-].
+// Accepted: com.foo, io.github.someuser.my-tool, local.dev.proj.
+// Rejected: AppID (uppercase), single (one segment), a.b (segment < 2 chars).
 var appIDRegex = regexp.MustCompile(`^([a-z0-9][a-z0-9-]{1,30}\.)+[a-z0-9][a-z0-9-]{1,30}$`)
 
 // Field length caps for app metadata. Defends against pathological inputs
 // (e.g. 1 MB display_name) that would otherwise be persisted verbatim.
 const (
-	maxAppIDLen      = 64
+	maxAppIDLen       = 64
 	maxDisplayNameLen = 256
 	maxDescriptionLen = 1024
 )
@@ -128,8 +127,8 @@ func AdminGetApp(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		var (
-			a           model.App
-			createdBy   string
+			a         model.App
+			createdBy string
 		)
 		err := db.QueryRowContext(r.Context(),
 			`SELECT a.app_id, a.display_name, a.description, a.created_at, a.created_by, u.email
