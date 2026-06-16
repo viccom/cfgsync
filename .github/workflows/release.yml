@@ -38,6 +38,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: cfgsync-linux-amd64
+          path: dist
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
