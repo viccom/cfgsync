@@ -329,3 +329,70 @@ func TestDeleteAppData_Idempotent(t *testing.T) {
 		t.Errorf("expected 204 on empty delete, got %d", w.Code)
 	}
 }
+
+func TestGetQuota_EmptyUser(t *testing.T) {
+	env := newTestEnv(t)
+	uid := env.seedUser(t, "u@example.com", "p12345678", false)
+	tok := env.userToken(uid, "u@example.com", false)
+
+	h := auth.UserMW(env.cfg.JWTSecret, GetQuota(env.db, env.cfg))
+	w := doGetReq(h, "/api/v1/me/quota", tok)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	for _, want := range []string{
+		`"storage_used_bytes":0`,
+		`"storage_limit_bytes":104857600`, // 100 MB
+		`"app_token_count":0`,
+		`"app_token_limit":100`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected %s in %s", want, body)
+		}
+	}
+}
+
+func TestGetQuota_ReflectsUserData(t *testing.T) {
+	env := newTestEnv(t)
+	adminUID := env.seedUser(t, "admin@example.com", "p12345678", true)
+	env.seedApp(t, "com.foo", "Foo", adminUID)
+	env.seedApp(t, "com.bar", "Bar", adminUID)
+
+	uid := env.seedUser(t, "u@example.com", "p12345678", false)
+	tok := env.userToken(uid, "u@example.com", false)
+	now := nowUnix()
+
+	// 10-byte payload for com.foo, 5-byte payload for com.bar = 15 total.
+	if _, err := env.db.Exec(
+		`INSERT INTO configs (user_id, app_id, version, payload, updated_at, updated_by) VALUES (?, 'com.foo', 1, '0123456789', ?, 'me')`,
+		uid, now,
+	); err != nil {
+		t.Fatalf("seed foo: %v", err)
+	}
+	if _, err := env.db.Exec(
+		`INSERT INTO configs (user_id, app_id, version, payload, updated_at, updated_by) VALUES (?, 'com.bar', 1, '01234', ?, 'me')`,
+		uid, now,
+	); err != nil {
+		t.Fatalf("seed bar: %v", err)
+	}
+	if _, err := env.db.Exec(
+		`INSERT INTO app_tokens (token_hash, token_prefix, user_id, app_id, label, created_at) VALUES ('h1', '1rc_aaaaaaaa', ?, 'com.foo', '', ?)`,
+		uid, now,
+	); err != nil {
+		t.Fatalf("seed token: %v", err)
+	}
+
+	h := auth.UserMW(env.cfg.JWTSecret, GetQuota(env.db, env.cfg))
+	w := doGetReq(h, "/api/v1/me/quota", tok)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, `"storage_used_bytes":15`) {
+		t.Errorf("expected storage_used_bytes:15 in %s", body)
+	}
+	if !strings.Contains(body, `"app_token_count":1`) {
+		t.Errorf("expected app_token_count:1 in %s", body)
+	}
+}

@@ -186,3 +186,39 @@ func DeleteAppData(db *sql.DB) http.HandlerFunc {
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
+
+// GetQuota reports the user's current storage and app_token usage against configured limits.
+// storage_used_bytes counts the byte length of every payload across all (user, app_id) pairs
+// (current versions only — history is not counted toward user quota, it is bounded by
+// HISTORY_PER_APP instead).
+func GetQuota(db *sql.DB, cfg *config.Config) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		uid := auth.UserID(r.Context())
+
+		var storageUsed int64
+		// SUM(LENGTH(payload)) returns NULL when user has no configs; coalesce to 0.
+		err := db.QueryRowContext(r.Context(),
+			`SELECT COALESCE(SUM(LENGTH(payload)), 0) FROM configs WHERE user_id = ?`,
+			uid,
+		).Scan(&storageUsed)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "internal")
+			return
+		}
+
+		var tokenCount int
+		if err := db.QueryRowContext(r.Context(),
+			`SELECT COUNT(*) FROM app_tokens WHERE user_id = ?`, uid,
+		).Scan(&tokenCount); err != nil {
+			writeError(w, http.StatusInternalServerError, "internal")
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"storage_used_bytes":  storageUsed,
+			"storage_limit_bytes": cfg.UserStorageLimit,
+			"app_token_count":     tokenCount,
+			"app_token_limit":     cfg.UserAppTokenLimit,
+		})
+	}
+}
