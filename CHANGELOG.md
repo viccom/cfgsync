@@ -4,6 +4,48 @@ All notable changes to this project are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-06-16
+
+Adds the embedded WebUI and a small backend endpoint to support it.
+
+### Added
+
+**WebUI** (embedded Preact SPA served from `/` on the same port as the API)
+- Login / register (email + password) with the existing user JWT + refresh token
+- My Apps — browse all platform-registered apps, jump to per-app token management
+- Per-app token management — list, revoke, and create new tokens. The plaintext
+  token is shown exactly once on a dedicated page with a copy button and a
+  `beforeunload` guard
+- My Quota — total usage, percentage bar, per-app breakdown. **No payload
+  content is displayed or editable** (WebUI never touches config payloads)
+- Settings — logout only
+- Admin: Apps CRUD (list, create, edit, delete with cascade warning)
+- Admin: Users list with pagination, promote-to-admin action
+
+**Backend**
+- `GET /api/v1/admin/users` — paginated user listing for the admin user
+  management page. Returns `id`, `email`, `is_admin`, `created_at`; never
+  includes `password_hash`
+
+**Embedding**
+- SPA source lives in `internal/webui/dist/` and is shipped inside the Go
+  binary via `embed.FS`. No build step. Preact + htm + @preact/signals are
+  loaded at runtime as ES modules from `esm.sh` (pinned versions:
+  preact@10.22.0, @preact/signals@1.2.3, htm@3.1.1)
+- The webui handler returns 404 for `/assets/*` misses (does not serve
+  `index.html` as a script/stylesheet), and falls back to `index.html` for
+  unknown non-asset paths (so client-side routes work on direct navigation /
+  browser refresh)
+
+### Notes
+
+- The WebUI does **not** display or edit config payloads. Software clients
+  continue to use `app_token` for `GET|PUT /apps/{app_id}/config`
+- Change-password is intentionally not exposed; the backend has no
+  `PUT /me/password` endpoint
+- No security hardening in this release (no CSP, no rate limiting, etc.) — see
+  known gaps in `CLAUDE.md`
+
 ## [0.2.0] - 2026-06-16
 
 Completes the admin management API surface. No breaking changes; purely
