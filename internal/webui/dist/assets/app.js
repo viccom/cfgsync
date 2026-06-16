@@ -435,7 +435,7 @@ function ShowToken({ appId, token }) {
     <h1>新 Token</h1>
     <div class="warning">⚠️ 请立即复制此 token。离开此页面后将无法再看到完整 token。</div>
     <p class="card-meta">app_id: ${appId}</p>
-    <div class="code" onClick=${(e) => { e.target.select && e.target.select(); }}>${token}</div>
+    <div class="code">${token}</div>
     <div class="btn-row" style="margin-top:16px">
       <button class="btn btn-primary" onClick=${copy}>复制</button>
       <a class="btn" href=${'/apps/' + appId} onClick=${(e) => { e.preventDefault(); navigate('/apps/' + appId); }}>我已保存，去应用详情</a>
@@ -452,37 +452,21 @@ function MyQuota() {
       .catch((e) => setErr(e.message));
   }, []);
   if (err) return html`<p class="error-text">${err}</p>`;
-  if (!quota) return html`<p class="muted">加载中…</p>`;
+  if (!quota) return html`<p class="muted">加载中…</p>';
 
-  const used = quota.used_bytes || 0;
-  const limit = quota.limit_bytes || 1;
+  const used = quota.storage_used_bytes || 0;
+  const limit = quota.storage_limit_bytes || 1;
   const pct = Math.min(100, Math.round((used / limit) * 100));
   return html`
     <h1>我的配额</h1>
     <div class="card">
-      <div>已用 ${humanBytes(used)} / ${humanBytes(limit)}（${pct}%）</div>
+      <div>存储已用 ${humanBytes(used)} / ${humanBytes(limit)}（${pct}%）</div>
       <div style="background:var(--border);height:8px;border-radius:4px;margin-top:8px;overflow:hidden">
         <div style=${'background:var(--primary);height:100%;width:' + pct + '%'}></div>
       </div>
+      <div class="muted" style="text-align:left;padding:8px 0 0">App Token：${quota.app_token_count || 0} / ${quota.app_token_limit || 0}</div>
     </div>
-    <h2>各应用占用</h2>
-    ${quota.per_app && quota.per_app.length > 0
-      ? html`
-        <table>
-          <thead><tr><th>app_id</th><th>大小</th><th>最后更新</th><th></th></tr></thead>
-          <tbody>
-            ${quota.per_app.map((p) => html`
-              <tr key=${p.app_id}>
-                <td data-label="app_id"><code>${p.app_id}</code></td>
-                <td data-label="大小">${humanBytes(p.bytes)}</td>
-                <td data-label="最后更新">${fmtTime(p.updated_at)}</td>
-                <td data-label="操作"><a class="btn" href=${'/apps/' + p.app_id} onClick=${(e) => { e.preventDefault(); navigate('/apps/' + p.app_id); }}>管理</a></td>
-              </tr>
-            `)}
-          </tbody>
-        </table>
-      `
-      : html`<p class="muted">还没有任何 app 的配置数据。</p>`}
+    <p class="muted">各应用占用明细暂未提供。如需查看某 app 的配置，请到"我的应用"中进入对应详情。</p>
   `;
 }
 

@@ -1,4 +1,4 @@
--- 1Remote-Cloud schema (version 2)
+-- cfgsync schema (version 2)
 -- 通用软件配置同步后端
 
 -- ============================================================

@@ -4,7 +4,10 @@ package db
 import (
 	"database/sql"
 	_ "embed"
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/viccom/cfgsync/internal/auth"
@@ -16,8 +19,21 @@ import (
 //go:embed schema.sql
 var schemaSQL string
 
+// currentSchemaVersion is the version recorded in the schema_version table
+// after Migrate completes. Bump this when schema.sql gains a new state
+// (and write the corresponding migration step in Migrate).
+const currentSchemaVersion = 2
+
 // Open opens (or creates) the SQLite database at path and applies WAL mode.
+// If the parent directory of path does not exist, it is created (0700) so a
+// fresh deployment with DB_PATH=/var/lib/cfgsync/data.db works without manual
+// mkdir. :memory: and bare filenames skip this step.
 func Open(path string) (*sql.DB, error) {
+	if dir := filepath.Dir(path); dir != "" && dir != "." && dir != "/" {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, fmt.Errorf("create db dir %s: %w", dir, err)
+		}
+	}
 	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)", path)
 	d, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -37,8 +53,8 @@ func Migrate(d *sql.DB) error {
 		return fmt.Errorf("apply schema: %w", err)
 	}
 	if _, err := d.Exec(
-		`INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (2, ?)`,
-		time.Now().Unix(),
+		`INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (?, ?)`,
+		currentSchemaVersion, time.Now().Unix(),
 	); err != nil {
 		return fmt.Errorf("record version: %w", err)
 	}
@@ -71,7 +87,7 @@ func BootstrapAdmin(d *sql.DB, cfg *config.Config) error {
 			return fmt.Errorf("bootstrap admin promote: %w", err)
 		}
 		return nil
-	case err == sql.ErrNoRows:
+	case errors.Is(err, sql.ErrNoRows):
 		// fall through to insert
 	default:
 		return fmt.Errorf("bootstrap admin lookup: %w", err)

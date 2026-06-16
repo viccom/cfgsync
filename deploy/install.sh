@@ -4,7 +4,7 @@
 set -euo pipefail
 
 REPO="github.com/viccom/cfgsync"
-VERSION="${VERSION:-v0.1.0}"
+VERSION="${VERSION:-v0.3.0}"
 INSTALL_DIR="/opt/cfgsync"
 DATA_DIR="$INSTALL_DIR/data"
 BACKUP_DIR="$INSTALL_DIR/backups"

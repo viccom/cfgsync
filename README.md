@@ -4,7 +4,7 @@ Generic per-user **software configuration sync** backend. Any application can sy
 
 Designed so a software author can adopt it without rewriting their app: a small sidecar can watch the target app's config file and push/pull to this service. The service is platform-neutral about payload contents — what users store under a given `app_id` is the user's responsibility.
 
-**Status**: v0.2.0 — MVP + Phase 2 complete. See [CHANGELOG.md](CHANGELOG.md).
+**Status**: v0.3.0 — MVP + Phase 2 + embedded WebUI. See [CHANGELOG.md](CHANGELOG.md).
 
 ## Quick start (dev)
 
@@ -129,7 +129,7 @@ Conflict response (`409`): `{error: "version_conflict", current_version, current
 
 ## Architecture
 
-See [`docs/superpowers/specs/2026-06-16-multi-app-config-sync-design.md`](docs/superpowers/specs/2026-06-16-multi-app-config-sync-design-design.md) for the full spec. Summary:
+See [`docs/superpowers/specs/2026-06-16-multi-app-config-sync-design.md`](docs/superpowers/specs/2026-06-16-multi-app-config-sync-design.md) for the full spec. Summary:
 
 - **Two-layer tokens**: user JWT manages the account; opaque app_token (one per `(user, app_id)`) does the sync. Software clients never see the user's password.
 - **Optimistic lock**: every PUT carries `version`; mismatch → 409 with current state. Clients merge.

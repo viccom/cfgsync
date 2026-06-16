@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/viccom/cfgsync/internal/auth"
@@ -163,9 +162,9 @@ func PutConfig(db *sql.DB, cfg *config.Config) http.HandlerFunc {
 				        SELECT id FROM config_history
 				         WHERE user_id = ? AND app_id = ?
 				         ORDER BY created_at DESC, id DESC
-				         LIMIT `+strconv.Itoa(cfg.HistoryPerApp)+`
+				         LIMIT ?
 				    )`,
-				at.UserID, at.AppID, at.UserID, at.AppID,
+				at.UserID, at.AppID, at.UserID, at.AppID, cfg.HistoryPerApp,
 			); err != nil {
 				writeError(w, http.StatusInternalServerError, "internal")
 				return

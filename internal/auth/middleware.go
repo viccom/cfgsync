@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -100,7 +101,7 @@ func AppTokenMW(d *sql.DB, next http.Handler) http.Handler {
 			`SELECT user_id, app_id FROM app_tokens WHERE token_hash = ?`,
 			tokenHash,
 		).Scan(&uid, &appID)
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			http.Error(w, `{"error":"invalid_token"}`, http.StatusUnauthorized)
 			return
 		}

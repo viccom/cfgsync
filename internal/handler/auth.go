@@ -11,6 +11,7 @@ import (
 	"github.com/viccom/cfgsync/internal/auth"
 	"github.com/viccom/cfgsync/internal/config"
 	"github.com/viccom/cfgsync/internal/model"
+	"modernc.org/sqlite"
 )
 
 // Register creates a new user (non-admin by default) and returns tokens.
@@ -117,9 +118,12 @@ func Refresh(db *sql.DB, cfg *config.Config) http.HandlerFunc {
 			writeError(w, http.StatusUnauthorized, "invalid_refresh_token")
 			return
 		}
-		_, _ = db.ExecContext(r.Context(),
+		if _, err := db.ExecContext(r.Context(),
 			`UPDATE refresh_tokens SET revoked_at = ? WHERE id = ?`,
-			time.Now().Unix(), req.RefreshToken)
+			time.Now().Unix(), req.RefreshToken); err != nil {
+			writeError(w, http.StatusInternalServerError, "internal")
+			return
+		}
 		issueAndRespond(w, db, r, cfg, uid, email, isAdmin)
 	}
 }
@@ -129,7 +133,7 @@ func Logout(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req model.RefreshRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.RefreshToken == "" {
-			w.WriteHeader(http.StatusNoContent)
+			writeError(w, http.StatusBadRequest, "invalid_json")
 			return
 		}
 		_, err := db.ExecContext(r.Context(),
@@ -182,6 +186,18 @@ func validEmail(s string) bool {
 	return true
 }
 
+// SQLITE_CONSTRAINT_PRIMARYKEY (1555) and SQLITE_CONSTRAINT_UNIQUE (2067) are
+// both treated as a uniqueness violation — apps.app_id is PK, users.email is UNIQUE.
 func isUniqueViolation(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "UNIQUE")
+	if err == nil {
+		return false
+	}
+	var se *sqlite.Error
+	if errors.As(err, &se) {
+		switch se.Code() {
+		case 1555, 2067:
+			return true
+		}
+	}
+	return false
 }

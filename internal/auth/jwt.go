@@ -26,7 +26,7 @@ func IssueAccess(secret []byte, uid, email string, isAdmin bool, ttl time.Durati
 		Email:   email,
 		IsAdmin: isAdmin,
 		RegisteredClaims: jwt.RegisteredClaims{
-			Issuer:    "1remote-cloud",
+			Issuer:    "cfgsync",
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
 		},
