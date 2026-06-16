@@ -4,6 +4,35 @@ All notable changes to this project are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-06-16
+
+Completes the admin management API surface. No breaking changes; purely
+additive endpoints and behavior is consistent with v0.1.0 contracts.
+
+### Added
+
+**Admin app management**
+- `GET /api/v1/admin/apps` — paginated list (`?limit=20&offset=0`), includes `created_by` user_id
+- `GET /api/v1/admin/apps/{app_id}` — single record with `created_by_email` (LEFT JOIN users)
+- `PATCH /api/v1/admin/apps/{app_id}` — partial update via `*string` fields (`display_name` / `description`); omitted fields untouched; empty body or empty `display_name` returns 400; unknown `app_id` returns 404
+- `DELETE /api/v1/admin/apps/{app_id}` — removes the app; `apps.app_id REFERENCES` with `ON DELETE CASCADE` atomically wipes all `configs` / `config_history` / `app_tokens` for that app across all users
+- `POST /api/v1/admin/users/{user_id}/promote` — grants `is_admin=1`; idempotent (re-promoting an admin is a 200 no-op); unknown `user_id` returns 404
+
+**Model**
+- `model.App.CreatedByEmail` (`json:"created_by_email,omitempty"`) — only populated by admin views
+- `model.PatchAppRequest` — `DisplayName` / `Description` as `*string` for partial-update semantics
+
+### Behavior notes
+
+- **JWT is stateless**: promoting a user does not modify their existing access token. The new admin claim appears on the next `/auth/login` or `/auth/refresh`. This matches the documented behavior from v0.1.0 §"JWT claim shape".
+- **App deletion is destructive and global**: `DELETE /admin/apps/{app_id}` wipes every user's data for that app. No undo, no soft-delete. Admins must be certain.
+- **Cascade is enforced by schema**, not application code: `configs.app_id`, `config_history.app_id`, and `app_tokens.app_id` all carry `REFERENCES apps(app_id) ON DELETE CASCADE`, with `PRAGMA foreign_keys=ON` set in `db.Open`.
+
+### Tests
+
+- 14 new handler tests covering each admin endpoint's happy path plus 403 / 404 / 400 edge cases
+- E2E curl flow exercises full lifecycle: list → create → get → patch → user data seed → delete (cascade) → promote → re-login as new admin
+
 ## [0.1.0] - 2026-06-16
 
 First usable release. Repositions the project from a 1Remote-specific sync

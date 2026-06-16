@@ -109,9 +109,14 @@ All paths are prefixed `/api/v1`. Errors use `{"error":"<code>"}` shape (some in
 
 | Method | Path | Description |
 |---|---|---|
+| GET | `/admin/apps` | Paginated list with `created_by` user_id |
 | POST | `/admin/apps` | Create app_id (reverse-domain format, max 64 chars) |
+| GET | `/admin/apps/{app_id}` | Single app detail with `created_by_email` |
+| PATCH | `/admin/apps/{app_id}` | Partial update `display_name` / `description` |
+| DELETE | `/admin/apps/{app_id}` | Delete app; **cascades** to all users' configs/history/tokens |
+| POST | `/admin/users/{user_id}/promote` | Grant `is_admin=1` (idempotent) |
 
-Future (Phase 3): `GET /admin/apps`, `GET/PATCH/DELETE /admin/apps/{id}`, `POST /admin/users/{id}/promote`.
+**JWT is stateless**: promotion propagates on the user's next login/refresh, not on their existing token.
 
 ### App token (sync operations)
 

@@ -65,7 +65,7 @@ Request flow: `cmd/server/main.go` loads `config`, opens+migrates `db`, calls `d
   - `auth.go` — Register/Login/Refresh/Logout (user JWT, no `app_id` involvement)
   - `apps.go` — `ListApps`/`GetApp` (user JWT, public app metadata)
   - `me.go` — `CreateAppToken`/`ListMyTokens`/`DeleteAppToken`/`DeleteAppData`/`GetQuota` (user JWT)
-  - `admin.go` — `AdminCreateApp` with reverse-domain `appIDRegex` validation (admin JWT)
+  - `admin.go` — `AdminCreateApp`/`AdminListApps`/`AdminGetApp`/`AdminPatchApp`/`AdminDeleteApp`/`AdminPromoteUser` (admin JWT, reverse-domain `appIDRegex` validation)
   - `sync.go` — `GetConfig`/`PutConfig` with optimistic lock, `?force=true`, 4 MB cap, storage quota, history trim
 - **`model`** — DTOs only (`User`, `App`, `CreateAppRequest`, `CreateAppTokenRequest/Response`, `AppTokenInfo`, `Config`, `PutConfigRequest`, auth DTOs).
 
@@ -136,7 +136,6 @@ Do not bypass this protocol — clients depend on the 409 contract to detect con
 
 ## Known gaps (deferred to subsequent releases)
 
-- Phase 3 admin API: `GET/PATCH/DELETE /admin/apps/{id}`, `GET /admin/apps`, `POST /admin/users/{id}/promote`
 - Rate limiting (brute-force on `/auth/login`)
 - Metrics / tracing (only `log.Printf` access log today)
 - Admin-side WebUI (intentionally out of scope; admin uses REST API directly)
