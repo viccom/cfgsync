@@ -29,6 +29,10 @@ func New(cfg *config.Config, db *sql.DB) http.Handler {
 	mux.Handle("GET /api/v1/apps", auth.UserMW(cfg.JWTSecret, handler.ListApps(db)))
 	mux.Handle("GET /api/v1/apps/{app_id}", auth.UserMW(cfg.JWTSecret, handler.GetApp(db)))
 	mux.Handle("POST /api/v1/me/apps/{app_id}/token", auth.UserMW(cfg.JWTSecret, handler.CreateAppToken(db, cfg)))
+	mux.Handle("GET /api/v1/me/tokens", auth.UserMW(cfg.JWTSecret, handler.ListMyTokens(db)))
+	mux.Handle("DELETE /api/v1/me/tokens/{token_prefix}", auth.UserMW(cfg.JWTSecret, handler.DeleteAppToken(db)))
+	mux.Handle("DELETE /api/v1/me/apps/{app_id}/data", auth.UserMW(cfg.JWTSecret, handler.DeleteAppData(db)))
+	mux.Handle("GET /api/v1/me/quota", auth.UserMW(cfg.JWTSecret, handler.GetQuota(db, cfg)))
 
 	// Admin (UserMW + AdminMW)
 	adminChain := func(h http.Handler) http.Handler {
