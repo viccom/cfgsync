@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -226,5 +227,73 @@ func TestPutConfig_StorageQuota_ForceDoesNotBypass(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), `"storage_quota_exceeded"`) {
 		t.Errorf("expected storage_quota_exceeded in %s", w.Body.String())
+	}
+}
+
+func TestPutConfig_HistoryTrim_KeepsMostRecentN(t *testing.T) {
+	env := newTestEnv(t)
+	env.cfg.HistoryPerApp = 3 // tiny for test
+	env.cfg.UserStorageLimit = 1000
+	uid := env.seedUser(t, "u@example.com", "password123", false)
+	tok := env.seedAppTokenFor(t, uid, "com.foo", "")
+
+	h := auth.AppTokenMW(env.db, PutConfig(env.db, env.cfg))
+	// 5 sequential writes: v0->v1->v2->v3->v4->v5
+	for i := int64(0); i < 5; i++ {
+		w := doAppTokenReq(t, h, "PUT", "/api/v1/apps/com.foo/config", "com.foo", tok,
+			map[string]interface{}{
+				"version":    i,
+				"payload":    fmt.Sprintf("v%d", i+1),
+				"updated_by": "MBA",
+			})
+		if w.Code != 200 {
+			t.Fatalf("write %d failed: %d body=%s", i, w.Code, w.Body.String())
+		}
+	}
+
+	var n int
+	env.db.QueryRow(`SELECT COUNT(*) FROM config_history WHERE user_id = ? AND app_id = ?`, uid, "com.foo").Scan(&n)
+	if n != 3 {
+		t.Errorf("expected 3 history rows after trim, got %d", n)
+	}
+
+	// The most recent 3 versions are 3, 4, 5.
+	var versions []int64
+	rows, _ := env.db.Query(`SELECT version FROM config_history WHERE user_id = ? AND app_id = ? ORDER BY version DESC`, uid, "com.foo")
+	defer rows.Close()
+	for rows.Next() {
+		var v int64
+		rows.Scan(&v)
+		versions = append(versions, v)
+	}
+	if len(versions) != 3 || versions[0] != 5 || versions[1] != 4 || versions[2] != 3 {
+		t.Errorf("expected [5 4 3], got %v", versions)
+	}
+}
+
+func TestPutConfig_HistoryTrim_DisabledWhenZero(t *testing.T) {
+	env := newTestEnv(t)
+	env.cfg.HistoryPerApp = 0
+	env.cfg.UserStorageLimit = 1000
+	uid := env.seedUser(t, "u@example.com", "password123", false)
+	tok := env.seedAppTokenFor(t, uid, "com.foo", "")
+
+	h := auth.AppTokenMW(env.db, PutConfig(env.db, env.cfg))
+	for i := int64(0); i < 10; i++ {
+		w := doAppTokenReq(t, h, "PUT", "/api/v1/apps/com.foo/config", "com.foo", tok,
+			map[string]interface{}{
+				"version":    i,
+				"payload":    fmt.Sprintf("v%d", i+1),
+				"updated_by": "MBA",
+			})
+		if w.Code != 200 {
+			t.Fatalf("write %d failed: %d body=%s", i, w.Code, w.Body.String())
+		}
+	}
+
+	var n int
+	env.db.QueryRow(`SELECT COUNT(*) FROM config_history WHERE user_id = ? AND app_id = ?`, uid, "com.foo").Scan(&n)
+	if n != 10 {
+		t.Errorf("expected 10 history rows when HistoryPerApp=0, got %d", n)
 	}
 }

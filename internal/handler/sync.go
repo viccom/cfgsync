@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/1remote/1remote-cloud/internal/auth"
@@ -150,6 +151,25 @@ func PutConfig(db *sql.DB, cfg *config.Config) http.HandlerFunc {
 			at.UserID, at.AppID, newVer, req.Payload, req.UpdatedBy, now); err != nil {
 			writeError(w, http.StatusInternalServerError, "internal")
 			return
+		}
+
+		// Trim history: keep the most recent HISTORY_PER_APP entries for this (user, app_id).
+		// A value of 0 disables trimming (keeps all history).
+		if cfg.HistoryPerApp > 0 {
+			if _, err := tx.ExecContext(r.Context(),
+				`DELETE FROM config_history
+				  WHERE user_id = ? AND app_id = ?
+				    AND id NOT IN (
+				        SELECT id FROM config_history
+				         WHERE user_id = ? AND app_id = ?
+				         ORDER BY created_at DESC, id DESC
+				         LIMIT `+strconv.Itoa(cfg.HistoryPerApp)+`
+				    )`,
+				at.UserID, at.AppID, at.UserID, at.AppID,
+			); err != nil {
+				writeError(w, http.StatusInternalServerError, "internal")
+				return
+			}
 		}
 
 		if err := tx.Commit(); err != nil {
