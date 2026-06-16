@@ -5,6 +5,10 @@ import (
 	"database/sql"
 	_ "embed"
 	"fmt"
+	"time"
+
+	"github.com/1remote/1remote-cloud/internal/auth"
+	"github.com/1remote/1remote-cloud/internal/config"
 
 	_ "modernc.org/sqlite"
 )
@@ -23,20 +27,51 @@ func Open(path string) (*sql.DB, error) {
 		_ = d.Close()
 		return nil, fmt.Errorf("ping: %w", err)
 	}
-	d.SetMaxOpenConns(1) // single writer; WAL still allows concurrent readers via SetMaxIdleConns
+	d.SetMaxOpenConns(1)
 	return d, nil
 }
 
 // Migrate creates tables and bumps schema_version to the latest.
-// Add new migrations to the migrations slice; do NOT mutate old entries.
 func Migrate(d *sql.DB) error {
 	if _, err := d.Exec(schemaSQL); err != nil {
 		return fmt.Errorf("apply schema: %w", err)
 	}
 	if _, err := d.Exec(
-		`INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (1, strftime('%s','now'))`,
+		`INSERT OR IGNORE INTO schema_version (version, applied_at) VALUES (2, ?)`,
+		time.Now().Unix(),
 	); err != nil {
 		return fmt.Errorf("record version: %w", err)
+	}
+	return nil
+}
+
+// BootstrapAdmin ensures the bootstrap admin user exists. No-op if env vars are empty.
+// If the email already exists (admin or not), the function does NOT overwrite the password.
+func BootstrapAdmin(d *sql.DB, cfg *config.Config) error {
+	if cfg.BootstrapAdminEmail == "" || cfg.BootstrapAdminPassword == "" {
+		return nil
+	}
+	var existing string
+	err := d.QueryRow(`SELECT id FROM users WHERE email = ?`, cfg.BootstrapAdminEmail).Scan(&existing)
+	if err == nil {
+		return nil
+	}
+	if err != sql.ErrNoRows {
+		return fmt.Errorf("bootstrap admin lookup: %w", err)
+	}
+
+	hash, err := auth.HashPassword(cfg.BootstrapAdminPassword)
+	if err != nil {
+		return fmt.Errorf("bootstrap admin hash: %w", err)
+	}
+	uid := auth.NewID()
+	now := time.Now().Unix()
+	_, err = d.Exec(
+		`INSERT INTO users (id, email, password_hash, is_admin, created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?)`,
+		uid, cfg.BootstrapAdminEmail, hash, now, now,
+	)
+	if err != nil {
+		return fmt.Errorf("bootstrap admin insert: %w", err)
 	}
 	return nil
 }
