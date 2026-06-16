@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/1remote/1remote-cloud/internal/auth"
-	"github.com/1remote/1remote-cloud/internal/model"
+	"github.com/viccom/cfgsync/internal/auth"
+	"github.com/viccom/cfgsync/internal/model"
 )
 
 func adminChain(env *testEnv, h http.Handler) http.Handler {

@@ -9,9 +9,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/1remote/1remote-cloud/internal/auth"
-	"github.com/1remote/1remote-cloud/internal/config"
-	"github.com/1remote/1remote-cloud/internal/model"
+	"github.com/viccom/cfgsync/internal/auth"
+	"github.com/viccom/cfgsync/internal/config"
+	"github.com/viccom/cfgsync/internal/model"
 )
 
 // CreateAppToken issues a new app token for (user, app_id), replacing any existing one.

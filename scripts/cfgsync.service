@@ -1,22 +1,22 @@
 [Unit]
-Description=1Remote Cloud Sync backend
+Description=cfgsync: software configuration sync backend
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-User=1remote
-Group=1remote
-WorkingDirectory=/opt/1remote-cloud
-ExecStart=/opt/1remote-cloud/1remote-cloud
+User=cfgsync
+Group=cfgsync
+WorkingDirectory=/opt/cfgsync
+ExecStart=/opt/cfgsync/cfgsync
 Restart=on-failure
 RestartSec=5s
-EnvironmentFile=/etc/1remote-cloud/env
+EnvironmentFile=/etc/cfgsync/env
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/opt/1remote-cloud/data /opt/1remote-cloud/backups
+ReadWritePaths=/opt/cfgsync/data /opt/cfgsync/backups
 StandardOutput=journal
 StandardError=journal
 

@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/1remote/1remote-cloud/internal/auth"
+	"github.com/viccom/cfgsync/internal/auth"
 )
 
 // seedAppTokenFor creates an app + app_token row for (uid, appID) and returns the plaintext.

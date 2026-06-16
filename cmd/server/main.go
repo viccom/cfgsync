@@ -11,9 +11,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/1remote/1remote-cloud/internal/config"
-	"github.com/1remote/1remote-cloud/internal/db"
-	"github.com/1remote/1remote-cloud/internal/server"
+	"github.com/viccom/cfgsync/internal/config"
+	"github.com/viccom/cfgsync/internal/db"
+	"github.com/viccom/cfgsync/internal/server"
 )
 
 func main() {

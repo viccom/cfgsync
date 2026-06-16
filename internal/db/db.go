@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/1remote/1remote-cloud/internal/auth"
-	"github.com/1remote/1remote-cloud/internal/config"
+	"github.com/viccom/cfgsync/internal/auth"
+	"github.com/viccom/cfgsync/internal/config"
 
 	_ "modernc.org/sqlite"
 )

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/1remote/1remote-cloud/internal/auth"
+	"github.com/viccom/cfgsync/internal/auth"
 )
 
 // doGetApp dispatches a GET through h with the path {app_id} set, mimicking the mux.

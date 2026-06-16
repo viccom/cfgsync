@@ -1,4 +1,4 @@
-module github.com/1remote/1remote-cloud
+module github.com/viccom/cfgsync
 
 go 1.25.0
 

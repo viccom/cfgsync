@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-`1Remote-Cloud` is a **generic per-user software configuration sync backend**. Any application can sync text-based config (≤ 4 MB per app) across devices via a language-neutral REST API. Personal-use oriented — no team/role/org. See [`docs/superpowers/specs/`](docs/superpowers/specs/) for design specs and [`CHANGELOG.md`](CHANGELOG.md) for release history.
+`cfgsync` is a **generic per-user software configuration sync backend**. Any application can sync text-based config (≤ 4 MB per app) across devices via a language-neutral REST API. Personal-use oriented — no team/role/org. See [`docs/superpowers/specs/`](docs/superpowers/specs/) for design specs and [`CHANGELOG.md`](CHANGELOG.md) for release history.
 
 ## Commands
 
@@ -14,7 +14,7 @@ go test ./...                                  # all tests
 go test -race -count=1 ./...                   # CI invocation (race detector, no cache)
 go test -run TestPutConfig_StorageQuota ./internal/handler/   # single test
 go vet ./...
-go build -trimpath -o /tmp/1remote-cloud ./cmd/server
+go build -trimpath -o /tmp/cfgsync ./cmd/server
 JWT_SECRET=$(openssl rand -hex 32) \
 BOOTSTRAP_ADMIN_EMAIL=admin@example.com \
 BOOTSTRAP_ADMIN_PASSWORD=admin-pass-123 \
@@ -132,7 +132,7 @@ Do not bypass this protocol — clients depend on the 409 contract to detect con
 
 ## Deploy
 
-`deploy/install.sh` provisions a Ubuntu/Debian VPS: creates a `1remote` system user, downloads the release binary into `/opt/1remote-cloud/bin`, generates `JWT_SECRET` into `/etc/1remote-cloud/env` (0600), installs the systemd unit (`scripts/1remote-cloud.service` with `ProtectSystem=strict`/`NoNewPrivileges`) and a backup cron (`scripts/backup.sh`, SQLite online `.backup`, default 30-day retention). Caddy (`deploy/Caddyfile`) terminates TLS and reverse-proxies to `127.0.0.1:28972`. Releases are cut by pushing a `v*` tag; `release.yml` builds `linux-amd64` with `-ldflags="-s -w"` and attaches a `.sha256`.
+`deploy/install.sh` provisions a Ubuntu/Debian VPS: creates a `cfgsync` system user, downloads the release binary into `/opt/cfgsync/bin`, generates `JWT_SECRET` into `/etc/cfgsync/env` (0600), installs the systemd unit (`scripts/cfgsync.service` with `ProtectSystem=strict`/`NoNewPrivileges`) and a backup cron (`scripts/backup.sh`, SQLite online `.backup`, default 30-day retention). Caddy (`deploy/Caddyfile`) terminates TLS and reverse-proxies to `127.0.0.1:28972`. Releases are cut by pushing a `v*` tag; `release.yml` builds `linux-amd64` with `-ldflags="-s -w"` and attaches a `.sha256`.
 
 ## Known gaps (deferred to subsequent releases)
 

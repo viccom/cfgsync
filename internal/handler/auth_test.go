@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/1remote/1remote-cloud/internal/model"
+	"github.com/viccom/cfgsync/internal/model"
 )
 
 func TestRegister_Success(t *testing.T) {

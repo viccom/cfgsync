@@ -6,7 +6,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/1remote/1remote-cloud/internal/model"
+	"github.com/viccom/cfgsync/internal/model"
 )
 
 // ListApps returns all registered apps with optional pagination (?limit=20&offset=0).

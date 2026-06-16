@@ -1,10 +1,10 @@
-# 1Remote-Cloud
+# cfgsync
 
 Generic per-user **software configuration sync** backend. Any application can sync its text-based config (up to 4 MB per app) across devices via a language-neutral REST API. Personal-use oriented — no team, role, or org concepts.
 
 Designed so a software author can adopt it without rewriting their app: a small sidecar can watch the target app's config file and push/pull to this service. The service is platform-neutral about payload contents — what users store under a given `app_id` is the user's responsibility.
 
-**Status**: v0.1.0 — MVP + Phase 2 complete. See [CHANGELOG.md](CHANGELOG.md).
+**Status**: v0.2.0 — MVP + Phase 2 complete. See [CHANGELOG.md](CHANGELOG.md).
 
 ## Quick start (dev)
 
@@ -139,7 +139,7 @@ See [`docs/superpowers/specs/2026-06-16-multi-app-config-sync-design.md`](docs/s
 
 ## Deploy
 
-`deploy/install.sh` provisions an Ubuntu/Debian VPS: creates a `1remote` system user, downloads the release binary into `/opt/1remote-cloud/bin`, generates `JWT_SECRET` into `/etc/1remote-cloud/env` (0600), installs the systemd unit (`scripts/1remote-cloud.service` with `ProtectSystem=strict`), and installs a backup cron (`scripts/backup.sh` using SQLite's online `.backup`).
+`deploy/install.sh` provisions an Ubuntu/Debian VPS: creates a `cfgsync` system user, downloads the release binary into `/opt/cfgsync/bin`, generates `JWT_SECRET` into `/etc/cfgsync/env` (0600), installs the systemd unit (`scripts/cfgsync.service` with `ProtectSystem=strict`), and installs a backup cron (`scripts/backup.sh` using SQLite's online `.backup`).
 
 Caddy (`deploy/Caddyfile`) terminates TLS and reverse-proxies to `127.0.0.1:28972`.
 

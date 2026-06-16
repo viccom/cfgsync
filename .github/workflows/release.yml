@@ -22,16 +22,16 @@ jobs:
       - name: Build (linux-amd64)
         run: |
           mkdir -p dist
-          go build -trimpath -ldflags="-s -w" -o dist/1remote-cloud-linux-amd64 ./cmd/server
-          sha256sum dist/1remote-cloud-linux-amd64 | awk '{print $1}' > dist/1remote-cloud-linux-amd64.sha256
+          go build -trimpath -ldflags="-s -w" -o dist/cfgsync-linux-amd64 ./cmd/server
+          sha256sum dist/cfgsync-linux-amd64 | awk '{print $1}' > dist/cfgsync-linux-amd64.sha256
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: 1remote-cloud-linux-amd64
+          name: cfgsync-linux-amd64
           path: |
-            dist/1remote-cloud-linux-amd64
-            dist/1remote-cloud-linux-amd64.sha256
+            dist/cfgsync-linux-amd64
+            dist/cfgsync-linux-amd64.sha256
 
   release:
     needs: build
@@ -42,6 +42,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/1remote-cloud-linux-amd64
-            dist/1remote-cloud-linux-amd64.sha256
+            dist/cfgsync-linux-amd64
+            dist/cfgsync-linux-amd64.sha256
           generate_release_notes: true

@@ -1,4 +1,4 @@
-# 1Remote-Cloud reverse proxy example.
+# cfgsync reverse proxy example.
 # Place at /etc/caddy/Caddyfile, then `systemctl reload caddy`.
 #
 # Requirements:

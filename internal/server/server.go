@@ -7,9 +7,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/1remote/1remote-cloud/internal/auth"
-	"github.com/1remote/1remote-cloud/internal/config"
-	"github.com/1remote/1remote-cloud/internal/handler"
+	"github.com/viccom/cfgsync/internal/auth"
+	"github.com/viccom/cfgsync/internal/config"
+	"github.com/viccom/cfgsync/internal/handler"
 )
 
 // New builds the top-level HTTP handler.

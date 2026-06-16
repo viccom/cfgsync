@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/1remote/1remote-cloud/internal/auth"
-	"github.com/1remote/1remote-cloud/internal/model"
+	"github.com/viccom/cfgsync/internal/auth"
+	"github.com/viccom/cfgsync/internal/model"
 )
 
 // appIDRegex enforces reverse-domain style: two or more dot-separated segments,

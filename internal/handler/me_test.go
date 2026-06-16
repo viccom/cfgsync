@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/1remote/1remote-cloud/internal/auth"
+	"github.com/viccom/cfgsync/internal/auth"
 )
 
 func TestCreateAppToken_Success(t *testing.T) {

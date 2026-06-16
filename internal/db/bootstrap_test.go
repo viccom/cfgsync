@@ -5,7 +5,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/1remote/1remote-cloud/internal/config"
+	"github.com/viccom/cfgsync/internal/config"
 )
 
 func TestBootstrapAdmin_CreatesWhenAbsent(t *testing.T) {

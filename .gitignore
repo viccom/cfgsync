@@ -1,5 +1,5 @@
 # Build artifacts
-/1remote-cloud
+/cfgsync
 /dist/
 *.exe
 *.test
@@ -21,3 +21,4 @@
 # OS
 .DS_Store
 Thumbs.db
+.worktrees/

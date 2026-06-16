@@ -1,4 +1,4 @@
-# 1Remote-Cloud — Quickstart
+# cfgsync — Quickstart
 
 For full design see [`cloud-sync-rfc.md`](../../1Remote/blob/main/.harness/docs/cloud-sync-rfc.md)
 and [`cloud-sync-implementation.md`](../../1Remote/blob/main/.harness/docs/cloud-sync-implementation.md).

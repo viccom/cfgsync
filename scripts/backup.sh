@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Backup the SQLite database using the safe .backup command (online).
-# Cron: 0 3 * * * /opt/1remote-cloud/scripts/backup.sh
+# Cron: 0 3 * * * /opt/cfgsync/scripts/backup.sh
 set -euo pipefail
 
-DB="${DB_PATH:-/opt/1remote-cloud/data/cloud.db}"
-BACKUP_DIR="${BACKUP_DIR:-/opt/1remote-cloud/backups}"
+DB="${DB_PATH:-/opt/cfgsync/data/cloud.db}"
+BACKUP_DIR="${BACKUP_DIR:-/opt/cfgsync/backups}"
 RETENTION_DAYS="${RETENTION_DAYS:-30}"
 
 mkdir -p "$BACKUP_DIR"

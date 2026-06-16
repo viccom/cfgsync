@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/1remote/1remote-cloud/internal/auth"
-	"github.com/1remote/1remote-cloud/internal/config"
-	"github.com/1remote/1remote-cloud/internal/model"
+	"github.com/viccom/cfgsync/internal/auth"
+	"github.com/viccom/cfgsync/internal/config"
+	"github.com/viccom/cfgsync/internal/model"
 )
 
 // Register creates a new user (non-admin by default) and returns tokens.

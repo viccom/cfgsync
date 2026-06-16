@@ -21,7 +21,7 @@ jobs:
         run: go mod download
 
       - name: Build
-        run: go build -trimpath -o /tmp/1remote-cloud ./cmd/server
+        run: go build -trimpath -o /tmp/cfgsync ./cmd/server
 
       - name: Test (with race detector)
         run: go test -race -count=1 ./...
