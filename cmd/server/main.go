@@ -19,6 +19,24 @@ import (
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
+	// First-run convenience: if no cfgsync.env sits next to the binary (or at
+	// CFGSYNC_CONFIG), generate one with a random JWT_SECRET and a random
+	// bootstrap admin password, then continue. The user gets a working setup
+	// by double-clicking the exe, no manual env configuration required.
+	cfgFile := os.Getenv("CFGSYNC_CONFIG")
+	if cfgFile == "" {
+		cfgFile = "cfgsync.env"
+	}
+	if _, err := os.Stat(cfgFile); os.IsNotExist(err) {
+		pw, gerr := config.GenerateDefaultConfig(cfgFile)
+		if gerr != nil {
+			log.Fatalf("generate default config: %v", gerr)
+		}
+		log.Printf("first run: generated %s", cfgFile)
+		log.Printf("first run: bootstrap admin email=admin@example.com password=%s", pw)
+		log.Printf("first run: change the password by editing %s and deleting the DB, or via SQL UPDATE users", cfgFile)
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("config: %v", err)

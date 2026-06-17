@@ -25,11 +25,23 @@ type Config struct {
 	AppTokenPrefix    string
 }
 
-// Load reads configuration from the environment.
+// Load reads configuration from the environment. Before reading env vars, it
+// pulls KEY=VALUE pairs from a dotenv file (default ./cfgsync.env, or the
+// file pointed to by CFGSYNC_CONFIG) so the server runs out of the box by
+// double-clicking the binary with a sibling cfgsync.env. Explicit env vars
+// on the process override file values — see LoadDotEnv.
 func Load() (*Config, error) {
+	cfgFile := os.Getenv("CFGSYNC_CONFIG")
+	if cfgFile == "" {
+		cfgFile = "cfgsync.env"
+	}
+	if err := LoadDotEnv(cfgFile); err != nil {
+		return nil, fmt.Errorf("load %s: %w", cfgFile, err)
+	}
+
 	secret := os.Getenv("JWT_SECRET")
 	if len(secret) < 32 {
-		return nil, fmt.Errorf("JWT_SECRET must be set and at least 32 bytes (use: openssl rand -hex 32)")
+		return nil, fmt.Errorf("JWT_SECRET must be set and at least 32 bytes (set it in %s or via env; first run auto-generates %s)", cfgFile, cfgFile)
 	}
 
 	return &Config{
