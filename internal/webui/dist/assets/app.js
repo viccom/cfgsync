@@ -478,7 +478,7 @@ function MyQuota() {
       .catch((e) => setErr(e.message));
   }, []);
   if (err) return html`<p class="error-text">${err}</p>`;
-  if (!quota) return html`<p class="muted">加载中…</p>';
+  if (!quota) return html`<p class="muted">加载中…</p>`;
 
   const used = quota.storage_used_bytes || 0;
   const limit = quota.storage_limit_bytes || 1;
