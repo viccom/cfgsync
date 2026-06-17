@@ -1,8 +1,20 @@
 // cfgsync WebUI — single-file Preact SPA. No build step.
+//
+// Fixes vs v0.3.0:
+//  - Top-level <App> now subscribes to all relevant signals via useSignals(),
+//    so login / nav clicks / state changes re-render without manual refresh.
+//  - Layout / interaction matches the new design system in app.css (GitHub
+//    Primer-inspired light theme: sticky nav, breadcrumbs, badges, skeleton
+//    loaders, empty states, modal dialogs, toasts).
+//  - Removed the Login/Register tab switch — single form with a "Sign up"
+//    toggle below the button.
+//  - All page components are now Preact function components using hooks.
 
 import { h, render } from 'https://esm.sh/preact@10.22.0';
-import { useState, useEffect } from 'https://esm.sh/preact@10.22.0/hooks';
-import { signal, computed } from 'https://esm.sh/@preact/signals@1.2.3';
+import {
+  useState, useEffect, useRef, useCallback, useMemo,
+} from 'https://esm.sh/preact@10.22.0/hooks';
+import { signal, computed, useSignalEffect } from 'https://esm.sh/@preact/signals@1.2.3?deps=preact@10.22.0';
 import htm from 'https://esm.sh/htm@3.1.1';
 
 const html = htm.bind(h);
@@ -13,6 +25,11 @@ const html = htm.bind(h);
 const LS_JWT = 'cfgsync_jwt';
 const LS_REFRESH = 'cfgsync_refresh';
 
+// app_id reverse-domain regex. Pulled out of JSX so htm's template parser
+// doesn't mistake the curly braces for an expression.
+const APP_ID_PATTERN = '^([a-z0-9][a-z0-9-]{1,30}\\.)+[a-z0-9][a-z0-9-]{1,30}$';
+
+// Server-side error code -> user-facing Chinese message.
 const ERR_MSGS = {
   invalid_json: '请求格式错误',
   invalid_email_or_password: '邮箱或密码格式不正确（密码至少 8 位）',
@@ -33,34 +50,77 @@ const ERR_MSGS = {
 };
 
 // ============================================================
-// signals (global state)
+// signals (global state) — automatic re-render via useSignals()
 // ============================================================
 const jwtSignal = signal(localStorage.getItem(LS_JWT) || null);
 const refreshSignal = signal(localStorage.getItem(LS_REFRESH) || null);
 const userSignal = computed(() => (jwtSignal.value ? decodeJwt(jwtSignal.value) : null));
-const toastSignal = signal(null);
 const routeSignal = signal(parseLocation());
+const toastSignal = signal(null);        // { kind, text, id } | null
+const menuOpenSignal = signal(false);    // user dropdown
 
-window.addEventListener('popstate', () => {
-  routeSignal.value = parseLocation();
-});
-
+// ============================================================
+// routing
+// ============================================================
 function parseLocation() {
   const path = location.pathname || '/';
-  const segments = path.split('/').filter(Boolean);
-  return { path, segments };
+  return { path, segments: path.split('/').filter(Boolean) };
 }
-
 function navigate(to) {
   if (location.pathname !== to) {
     history.pushState({}, '', to);
     routeSignal.value = parseLocation();
+  } else {
+    routeSignal.value = parseLocation(); // force re-render even when same
   }
+}
+window.addEventListener('popstate', () => { routeSignal.value = parseLocation(); });
+
+// ============================================================
+// jwt decode
+// ============================================================
+function decodeJwt(jwt) {
+  try {
+    const parts = jwt.split('.');
+    if (parts.length !== 3) return null;
+    const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
+    return { id: payload.uid, email: payload.email, is_admin: !!payload.adm, exp: payload.exp };
+  } catch { return null; }
+}
+
+function isExpired(decoded) {
+  if (!decoded || !decoded.exp) return false; // unknown expiry
+  return decoded.exp * 1000 < Date.now();
 }
 
 // ============================================================
-// api client
+// api client — fetch wrapper with silent refresh on 401
 // ============================================================
+let refreshInFlight = null;
+async function tryRefresh() {
+  if (refreshInFlight) return refreshInFlight;
+  const r = refreshSignal.value;
+  if (!r) return false;
+  refreshInFlight = (async () => {
+    try {
+      const res = await fetch('/api/v1/auth/refresh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh_token: r }),
+      });
+      if (!res.ok) return false;
+      const data = await res.json();
+      localStorage.setItem(LS_JWT, data.access_token);
+      localStorage.setItem(LS_REFRESH, data.refresh_token);
+      jwtSignal.value = data.access_token;
+      refreshSignal.value = data.refresh_token;
+      return true;
+    } catch { return false; }
+    finally { refreshInFlight = null; }
+  })();
+  return refreshInFlight;
+}
+
 async function call(method, path, body, opts = {}) {
   const headers = { 'Content-Type': 'application/json' };
   const t = jwtSignal.value;
@@ -74,55 +134,53 @@ async function call(method, path, body, opts = {}) {
     const text = await res.text();
     let data = null;
     try { data = text ? JSON.parse(text) : null; } catch {}
-    if (!res.ok) {
-      const code = data?.error || `http_${res.status}`;
-      const err = new Error(ERR_MSGS[code] || code);
-      err.status = res.status;
-      err.body = data;
-      throw err;
-    }
-    return data;
+    return { res, data };
   };
 
-  try {
-    return await doFetch();
-  } catch (err) {
-    if (err.status === 401 && !opts._retried && isIdempotent(method)) {
-      const refreshed = await tryRefresh();
-      if (refreshed) {
-        opts._retried = true;
-        return await doFetch();
-      }
+  let { res, data } = await doFetch();
+
+  // Silent refresh + retry on 401 for idempotent methods.
+  if (res.status === 401 && !opts._retried && !isAuthFreePath(path) && isIdempotent(method)) {
+    const ok = await tryRefresh();
+    if (ok) {
+      ({ res, data } = await doFetch());
     }
+  }
+
+  if (!res.ok) {
+    const code = data?.error || `http_${res.status}`;
+    const err = new Error(ERR_MSGS[code] || code);
+    err.status = res.status;
+    err.body = data;
+    err.code = code;
     throw err;
   }
+  return data;
 }
 
-function isIdempotent(method) {
-  return method === 'GET' || method === 'DELETE' || method === 'PUT' || method === 'HEAD';
+function isAuthFreePath(path) { return path.startsWith('/api/v1/auth/'); }
+function isIdempotent(m) { return m === 'GET' || m === 'DELETE' || m === 'PUT' || m === 'HEAD'; }
+
+// ============================================================
+// toasts
+// ============================================================
+let toastSeq = 0;
+function showToast(kind, text) {
+  toastSignal.value = { kind, text, id: ++toastSeq };
+  setTimeout(() => {
+    if (toastSignal.value?.id === toastSeq) toastSignal.value = null;
+  }, 3500);
 }
 
-async function tryRefresh() {
-  const r = refreshSignal.value;
-  if (!r) return false;
-  try {
-    const res = await fetch('/api/v1/auth/refresh', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ refresh_token: r }),
-    });
-    const data = await res.json();
-    if (!res.ok) return false;
-    localStorage.setItem(LS_JWT, data.access_token);
-    localStorage.setItem(LS_REFRESH, data.refresh_token);
-    jwtSignal.value = data.access_token;
-    refreshSignal.value = data.refresh_token;
-    return true;
-  } catch {
-    return false;
-  }
+// ============================================================
+// auth actions
+// ============================================================
+function clearLocalSession() {
+  localStorage.removeItem(LS_JWT);
+  localStorage.removeItem(LS_REFRESH);
+  jwtSignal.value = null;
+  refreshSignal.value = null;
 }
-
 function logout() {
   const r = refreshSignal.value;
   if (r) {
@@ -132,65 +190,96 @@ function logout() {
       body: JSON.stringify({ refresh_token: r }),
     }).catch(() => {});
   }
-  localStorage.removeItem(LS_JWT);
-  localStorage.removeItem(LS_REFRESH);
-  jwtSignal.value = null;
-  refreshSignal.value = null;
+  clearLocalSession();
+  showToast('info', '已退出登录');
+  menuOpenSignal.value = false;
   navigate('/login');
 }
 
-function decodeJwt(jwt) {
-  try {
-    const parts = jwt.split('.');
-    if (parts.length !== 3) return null;
-    const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
-    return { id: payload.uid, email: payload.email, is_admin: !!payload.adm, exp: payload.exp };
-  } catch {
-    return null;
-  }
+// ============================================================
+// shared hooks
+// ============================================================
+function useApi(method, path, deps = []) {
+  // Returns { data, err, loading, reload } for a single-shot GET.
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    setErr(null);
+    call(method, path).then(
+      (d) => { if (alive) { setData(d); setLoading(false); } },
+      (e) => { if (alive) { setErr(e); setLoading(false); } },
+    );
+    return () => { alive = false; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [method, path, ...deps, tick]);
+  return { data, err, loading, reload: () => setTick(t => t + 1) };
 }
 
-function showToast(kind, text, ttl = 3000) {
-  toastSignal.value = { kind, text, ttl };
-  if (ttl > 0) {
-    setTimeout(() => {
-      if (toastSignal.value && toastSignal.value.text === text) toastSignal.value = null;
-    }, ttl);
-  }
+function usePageClickAway(enabled, onClose) {
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!enabled) return;
+    const handler = (e) => {
+      if (ref.current && !ref.current.contains(e.target)) onClose();
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [enabled, onClose]);
+  return ref;
 }
 
 // ============================================================
 // top-level <App>
 // ============================================================
 function App() {
-  const { path, segments } = routeSignal.value;
-  const jwt = jwtSignal.value;
-  const user = userSignal.value;
+  // Subscribe to all signals that affect rendering. This is the v0.3.0 fix:
+  // without explicit subscription, changes to jwtSignal / routeSignal did
+  // not trigger re-render.
 
-  if (!jwt && path !== '/login' && path !== '/register') {
-    queueMicrotask(() => navigate('/login'));
-    return html`<${Loading} />`;
-  }
-  if (jwt && segments[0] === 'admin' && !(user && user.is_admin)) {
-    queueMicrotask(() => {
+  const { path, segments } = routeSignal.value;
+  const user = userSignal.value;
+  const jwt = jwtSignal.value;
+
+  // Auto-redirect: not logged in -> /login, non-admin hitting /admin -> /apps.
+  useEffect(() => {
+    if (!jwt && path !== '/login' && path !== '/register' && path !== '/') {
+      navigate('/login');
+    } else if (jwt && path === '/') {
+      navigate(user && user.is_admin ? '/admin/apps' : '/apps');
+    } else if (jwt && segments[0] === 'admin' && !(user && user.is_admin)) {
       showToast('err', '需要管理员权限');
       navigate('/apps');
-    });
-    return html`<${Loading} />`;
+    } else if (jwt && isExpired(user)) {
+      showToast('err', '会话已过期，请重新登录');
+      clearLocalSession();
+      navigate('/login');
+    }
+  }, [jwt, path, user]);
+
+  // Close user menu on route change.
+  useEffect(() => { menuOpenSignal.value = false; }, [path]);
+
+  if (!jwt && (path === '/login' || path === '/register')) {
+    return html`<${AuthPage} mode=${path === '/register' ? 'register' : 'login'} />`;
   }
+  if (!jwt) return html`<${Loading} />`;
 
   return html`
     <${Nav} />
-    <main class="main">
+    <main class="main ${isAdminPath(segments) ? 'main-wide' : ''}">
       ${renderRoute(path, segments)}
     </main>
-    <${Toast} />
+    <${ToastStack} />
   `;
 }
 
+function isAdminPath(segments) { return segments[0] === 'admin'; }
+
 function renderRoute(path, segments) {
-  if (path === '/' || path === '/login') return html`<${Login} tab="login" />`;
-  if (path === '/register') return html`<${Login} tab="register" />`;
   if (path === '/apps') return html`<${MyApps} />`;
   if (segments[0] === 'apps' && segments[1]) return html`<${AppDetail} appId=${segments[1]} />`;
   if (path === '/me') return html`<${MyQuota} />`;
@@ -202,219 +291,513 @@ function renderRoute(path, segments) {
     return html`<${AdminAppEdit} mode="edit" appId=${segments[2]} />`;
   if (path === '/admin/users') return html`<${AdminUsers} />`;
   if (segments[0] === 'show-token') {
-    const id = segments[1] || '';
-    const token = decodeURIComponent(segments.slice(2).join('/'));
-    return html`<${ShowToken} appId=${id} token=${token} />`;
+    return html`<${ShowToken} appId=${segments[1]} token=${decodeURIComponent(segments.slice(2).join('/'))} />`;
   }
   return html`<${NotFound} />`;
 }
 
 // ============================================================
-// components
+// Nav (sticky top bar with user dropdown)
 // ============================================================
 function Nav() {
+
   const user = userSignal.value;
+  const { path } = routeSignal.value;
+  const isAdmin = user && user.is_admin;
+  const menuOpen = menuOpenSignal.value;
+  const ref = usePageClickAway(menuOpen, () => { menuOpenSignal.value = false; });
+
+  const isActive = (p) => path === p;
+  const initial = (user && user.email) ? user.email[0].toUpperCase() : '?';
+
   return html`
-    <nav class="nav">
-      <a class="nav-brand" href="/apps" onClick=${(e) => { e.preventDefault(); navigate('/apps'); }}>cfgsync</a>
+    <nav class="nav" aria-label="primary">
+      <a class="nav-brand" href="/apps"
+         onClick=${(e) => { e.preventDefault(); navigate('/apps'); }}>
+        <span class="nav-brand-mark">cf</span>
+        cfgsync
+      </a>
       <div class="nav-right">
-        ${user && html`
-          <span>${user.email}</span>
-          ${user.is_admin && html`
-            <a href="/admin/apps" onClick=${(e) => { e.preventDefault(); navigate('/admin/apps'); }}>应用管理</a>
-            <a href="/admin/users" onClick=${(e) => { e.preventDefault(); navigate('/admin/users'); }}>用户管理</a>
-          `}
-          <a href="/me" onClick=${(e) => { e.preventDefault(); navigate('/me'); }}>配额</a>
-          <a href="/me/settings" onClick=${(e) => { e.preventDefault(); navigate('/me/settings'); }}>设置</a>
-          <button onClick=${logout}>退出</button>
-        `}
+        ${isAdmin ? html`<${NavAdminLinks} isActive=${isActive} />` : null}
+        <a class="nav-link ${isActive('/me') ? 'active' : ''}"
+           href="/me"
+           onClick=${(e) => { e.preventDefault(); navigate('/me'); }}>
+          <span>配额</span>
+        </a>
+        <a class="nav-link ${isActive('/me/settings') ? 'active' : ''}"
+           href="/me/settings"
+           onClick=${(e) => { e.preventDefault(); navigate('/me/settings'); }}>
+          <span>设置</span>
+        </a>
+        <span class="nav-divider"></span>
+        <button ref=${ref} class="nav-user-btn"
+                onClick=${(e) => { e.stopPropagation(); menuOpenSignal.value = !menuOpen; }}
+                aria-haspopup="menu" aria-expanded=${menuOpen}>
+          <span class="nav-user-btn-avatar">${initial}</span>
+          <span>${user ? user.email : ''}</span>
+          <span aria-hidden="true">▾</span>
+        </button>
+        ${menuOpen ? html`<${NavUserMenu} onNavigate=${() => navigate('/me/settings')} />` : null}
       </div>
     </nav>
   `;
 }
 
-function Loading() {
-  return html`<main class="main"><p class="muted">加载中…</p></main>`;
-}
-
-function NotFound() {
+// ============================================================
+// NavAdminLinks — admin-only nav entries (应用管理 / 用户管理), as a
+// separate htm template so the parent <Nav> doesn't use the
+// ${A && html`...`} pattern htm can't parse across multi-line children.
+// ============================================================
+function NavAdminLinks({ isActive }) {
   return html`
-    <main class="main">
-      <h1>页面不存在</h1>
-      <p><a href="/apps" onClick=${(e) => { e.preventDefault(); navigate('/apps'); }}>返回首页</a></p>
-    </main>
+    <a class="nav-link ${isActive('/admin/apps') ? 'active' : ''}"
+       href="/admin/apps"
+       onClick=${(e) => { e.preventDefault(); navigate('/admin/apps'); }}>应用管理</a>
+    <a class="nav-link ${isActive('/admin/users') ? 'active' : ''}"
+       href="/admin/users"
+       onClick=${(e) => { e.preventDefault(); navigate('/admin/users'); }}>用户管理</a>
   `;
 }
 
-function Toast() {
-  const t = toastSignal.value;
-  if (!t) return null;
-  return html`<div class=${'toast toast-' + t.kind}>${t.text}</div>`;
-}
-
-function Login({ tab }) {
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState(null);
-  const isLogin = tab === 'login';
-
-  const submit = async (e) => {
-    e.preventDefault();
-    setBusy(true);
-    setErr(null);
-    try {
-      const data = await call('POST', isLogin ? '/api/v1/auth/login' : '/api/v1/auth/register', {
-        email, password,
-      });
-      localStorage.setItem(LS_JWT, data.access_token);
-      localStorage.setItem(LS_REFRESH, data.refresh_token);
-      jwtSignal.value = data.access_token;
-      refreshSignal.value = data.refresh_token;
-      const u = userSignal.value;
-      navigate(u && u.is_admin ? '/admin/apps' : '/apps');
-    } catch (e) {
-      setErr(e.message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
+// ============================================================
+// AuthFooterLink — "Don't have an account? Sign up" / inverse, as a
+// separate htm template to keep the AuthPage template parser-simple.
+// ============================================================
+function AuthFooterLink({ kind, setTab }) {
+  if (kind === 'register') {
+    return html`
+      <span>没有账号？<a href="/register" onClick=${(e) => { e.preventDefault(); setTab('register'); }}>立即注册</a></span>
+    `;
+  }
   return html`
-    <h1>${isLogin ? '登录' : '注册'}</h1>
-    <form class="form" onSubmit=${submit}>
-      <div>
-        <label>邮箱</label>
-        <input type="email" required value=${email} onInput=${(e) => setEmail(e.target.value)} />
-      </div>
-      <div>
-        <label>密码（至少 8 位）</label>
-        <input type="password" required minLength="8" value=${password} onInput=${(e) => setPassword(e.target.value)} />
-      </div>
-      ${err && html`<div class="field-error">${err}</div>`}
-      <button class="btn btn-primary" type="submit" disabled=${busy}>${busy ? '处理中…' : (isLogin ? '登录' : '注册')}</button>
-      <p class="muted" style="font-size:12px">
-        ${isLogin
-          ? html`还没账号？<a href="/register" onClick=${(e) => { e.preventDefault(); navigate('/register'); }}>去注册</a>`
-          : html`已有账号？<a href="/login" onClick=${(e) => { e.preventDefault(); navigate('/login'); }}>去登录</a>`}
-      </p>
-    </form>
+    <span>已有账号？<a href="/login" onClick=${(e) => { e.preventDefault(); setTab('login'); }}>直接登录</a></span>
   `;
 }
 
-function MyApps() {
-  const [apps, setApps] = useState(null);
-  const [err, setErr] = useState(null);
-  useEffect(() => {
-    call('GET', '/api/v1/apps')
-      .then((d) => setApps(d.apps || []))
-      .catch((e) => setErr(e.message));
-  }, []);
-
-  if (err) return html`<p class="error-text">${err}</p>`;
-  if (apps === null) return html`<p class="muted">加载中…</p>`;
-  if (apps.length === 0) return html`<p class="muted">暂无可用应用。请联系管理员注册 app_id。</p>`;
-
+// ============================================================
+// NavUserMenu — dropdown rendered as a separate htm template so the
+// parent <Nav> template doesn't have to use ${A && html`...`} (which
+// htm can't parse when the inner template contains complex children).
+// ============================================================
+function NavUserMenu({ user, onNavigate }) {
   return html`
-    <h1>我的应用</h1>
-    <div class="grid">
-      ${apps.map((a) => html`
-        <div class="card" key=${a.app_id}>
-          <div class="card-title">${a.display_name}</div>
-          <div class="card-meta">${a.app_id}</div>
-          <p>${a.description || ''}</p>
-          <a class="btn" href=${'/apps/' + a.app_id} onClick=${(e) => { e.preventDefault(); navigate('/apps/' + a.app_id); }}>管理 Token</a>
-        </div>
-      `)}
+    <div class="nav-user-menu" role="menu">
+      <div class="nav-user-menu-header">
+        <div class="nav-user-menu-email">${user.email}</div>
+        <div class="nav-user-menu-role">${user.is_admin ? '管理员' : '普通用户'}</div>
+      </div>
+      <button class="nav-user-menu-item" role="menuitem"
+              onClick=${onNavigate}>账号设置</button>
+      <button class="nav-user-menu-item danger" role="menuitem"
+              onClick=${logout}>退出登录</button>
     </div>
   `;
 }
 
-function AppDetail({ appId }) {
-  const [tokens, setTokens] = useState(null);
-  const [err, setErr] = useState(null);
-  const [label, setLabel] = useState('');
-  const [confirmDel, setConfirmDel] = useState(null);
-  const [busy, setBusy] = useState(false);
+// ============================================================
+// Toast stack
+// ============================================================
+function ToastStack() {
 
-  const load = () => {
-    setTokens(null);
-    setErr(null);
-    call('GET', '/api/v1/me/tokens')
-      .then((d) => setTokens((d.tokens || []).filter((t) => t.app_id === appId)))
-      .catch((e) => setErr(e.message));
+  const t = toastSignal.value;
+  if (!t) return null;
+  return html`
+    <div class="toast-stack" role="status" aria-live="polite">
+      <div class=${'toast toast-' + t.kind}>
+        <span>${t.text}</span>
+        <button class="toast-close" aria-label="关闭"
+                onClick=${() => { toastSignal.value = null; }}>×</button>
+      </div>
+    </div>
+  `;
+}
+
+// ============================================================
+// Loading / NotFound
+// ============================================================
+function Loading() {
+  return html`<div class="loading-text" style="padding:48px;text-align:center">加载中…</div>`;
+}
+
+function NotFound() {
+  return html`
+    <div class="main">
+      <div class="empty">
+        <div class="empty-icon">?</div>
+        <div class="empty-title">页面不存在</div>
+        <div class="empty-desc">你访问的路径没有匹配任何页面。</div>
+        <div class="empty-cta">
+          <a class="btn" href="/apps"
+             onClick=${(e) => { e.preventDefault(); navigate('/apps'); }}>返回首页</a>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// ============================================================
+// Auth (login + register)
+// ============================================================
+function AuthPage({ mode }) {
+  // local state
+  const [tab, setTab] = useState(mode === 'register' ? 'register' : 'login');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setBusy(true); setErr(null);
+    try {
+      const path = tab === 'login' ? '/api/v1/auth/login' : '/api/v1/auth/register';
+      const data = await call('POST', path, { email, password });
+      localStorage.setItem(LS_JWT, data.access_token);
+      localStorage.setItem(LS_REFRESH, data.refresh_token);
+      jwtSignal.value = data.access_token;
+      refreshSignal.value = data.refresh_token;
+      // redirect happens via App's useEffect
+    } catch (e) { setErr(e.message); setBusy(false); }
   };
-  useEffect(load, [appId]);
+
+  return html`
+    <a class="skip-link" href="#main">跳到主内容</a>
+    <div class="auth-page" id="main">
+      <div class="auth-card">
+        <div class="auth-brand">
+          <div class="auth-brand-mark">cf</div>
+          <div class="auth-brand-name">cfgsync</div>
+        </div>
+        <div class="auth-tabs" role="tablist">
+          <button class=${'auth-tab ' + (tab === 'login' ? 'active' : '')}
+                  role="tab" aria-selected=${tab === 'login'}
+                  onClick=${() => setTab('login')}>登录</button>
+          <button class=${'auth-tab ' + (tab === 'register' ? 'active' : '')}
+                  role="tab" aria-selected=${tab === 'register'}
+                  onClick=${() => setTab('register')}>注册</button>
+        </div>
+        <form class="form" onSubmit=${submit} novalidate>
+          <div class="form-row">
+            <label for="email">邮箱</label>
+            <input id="email" name="email" type="email" autocomplete="email"
+                   required value=${email} onInput=${(e) => setEmail(e.target.value)} />
+          </div>
+          <div class="form-row">
+            <label for="password">密码</label>
+            <input id="password" name="password" type="password" autocomplete=${tab === 'login' ? 'current-password' : 'new-password'}
+                   required minLength="8" value=${password} onInput=${(e) => setPassword(e.target.value)} />
+            <span class="hint">至少 8 位</span>
+          </div>
+          ${err && html`<div class="notice notice-danger"><span class="notice-icon">!</span><span>${err}</span></div>`}
+          <div class="form-actions">
+            <button class="btn btn-primary btn-block" type="submit" disabled=${busy}>
+              ${busy ? '处理中…' : (tab === 'login' ? '登录' : '注册')}
+            </button>
+          </div>
+        </form>
+        <div class="form-footer">
+          ${tab === 'login' ? html`<${AuthFooterLink} kind="register" tab=${tab} setTab=${setTab} />` : html`<${AuthFooterLink} kind="login" tab=${tab} setTab=${setTab} />`}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// ============================================================
+// MyApps
+// ============================================================
+function MyApps() {
+  const { data, err, loading } = useApi('GET', '/api/v1/apps');
+  if (err) return html`<${ErrorBox} err=${err} />`;
+  if (loading) return html`<${AppsSkeleton} />`;
+  const apps = data?.apps || [];
+
+  return html`
+    <nav class="breadcrumb" aria-label="breadcrumbs">
+      <a href="/apps" onClick=${(e) => { e.preventDefault(); navigate('/apps'); }}>我的应用</a>
+    </nav>
+    <div class="page-header">
+      <div class="page-header-content">
+        <h1 class="page-title">我的应用</h1>
+        <p class="page-description">浏览可用应用，配置同步凭证。</p>
+      </div>
+    </div>
+
+    ${apps.length === 0
+      ? html`
+        <div class="empty">
+          <div class="empty-icon">⌘</div>
+          <div class="empty-title">暂无可用应用</div>
+          <div class="empty-desc">管理员还没有注册任何 app_id。如果你已经搭建了服务端，请联系管理员添加应用。</div>
+        </div>
+      `
+      : html`
+        <div class="grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px">
+          ${apps.map((a) => html`
+            <a key=${a.app_id} class="card" href=${'/apps/' + a.app_id}
+               onClick=${(e) => { e.preventDefault(); navigate('/apps/' + a.app_id); }}
+               style="display:block;color:inherit;text-decoration:none">
+              <div class="card-title">${a.display_name}</div>
+              <div class="card-meta mono">${a.app_id}</div>
+              ${a.description && html`<p style="margin:8px 0 0;color:var(--text-muted);font-size:13px">${a.description}</p>`}
+              <div class="btn-row" style="margin-top:12px">
+                <span class="btn btn-sm">管理 Token</span>
+              </div>
+            </a>
+          `)}
+        </div>
+      `}
+  `;
+}
+
+function AppsSkeleton() {
+  return html`
+    <div class="grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px">
+      ${[1, 2, 3].map(() => html`<div class="card"><div class="skeleton" style="height:80px"></div></div>`)}
+    </div>
+  `;
+}
+
+function ErrorBox({ err }) {
+  return html`
+    <div class="notice notice-danger">
+      <span class="notice-icon">!</span>
+      <div>
+        <div><strong>加载失败</strong></div>
+        <div>${err.message}</div>
+        ${err.status === 401 && html`
+          <div style="margin-top:8px">
+            <a class="btn btn-sm" href="/login"
+               onClick=${(e) => { e.preventDefault(); clearLocalSession(); navigate('/login'); }}>
+              重新登录
+            </a>
+          </div>
+        `}
+      </div>
+    </div>
+  `;
+}
+
+// ============================================================
+// AppDetail (per-app token management)
+// ============================================================
+function AppDetail({ appId }) {
+
+  const { data, err, loading, reload } = useApi('GET', '/api/v1/me/tokens', [appId]);
+  const [label, setLabel] = useState('');
+  const [creating, setCreating] = useState(false);
+  const [confirmDel, setConfirmDel] = useState(null);
+  const [errMsg, setErrMsg] = useState(null);
+
+  if (err) return html`<${ErrorBox} err=${err} />`;
+  if (loading) return html`<div class="loading-text">加载中…</div>`;
+
+  const myTokens = (data?.tokens || []).filter((t) => t.app_id === appId);
 
   const create = async (e) => {
     e.preventDefault();
-    setBusy(true);
-    setErr(null);
+    setCreating(true); setErrMsg(null);
     try {
       const data = await call('POST', `/api/v1/me/apps/${appId}/token`, { label });
       navigate('/show-token/' + appId + '/' + encodeURIComponent(data.token));
     } catch (e) {
-      setErr(e.message);
-    } finally {
-      setBusy(false);
+      setErrMsg(e.message);
+      setCreating(false);
     }
   };
 
   const revoke = async (prefix) => {
-    setBusy(true);
-    setErr(null);
+    setConfirmDel(null);
     try {
       await call('DELETE', `/api/v1/me/tokens/${prefix}`);
       showToast('ok', '已撤销');
-      setConfirmDel(null);
-      load();
-    } catch (e) {
-      setErr(e.message);
-    } finally {
-      setBusy(false);
-    }
+      reload();
+    } catch (e) { showToast('err', e.message); }
   };
 
   return html`
-    <h1>管理 Token</h1>
-    <p class="card-meta">${appId}</p>
-
-    <h2>新建 Token</h2>
-    <form class="form" onSubmit=${create}>
-      <div>
-        <label>标签（可选）</label>
-        <input value=${label} onInput=${(e) => setLabel(e.target.value)} placeholder="例如：MacBook Air" />
+    <nav class="breadcrumb">
+      <a href="/apps" onClick=${(e) => { e.preventDefault(); navigate('/apps'); }}>我的应用</a>
+      <span class="breadcrumb-sep">/</span>
+      <span class="breadcrumb-current">${appId}</span>
+    </nav>
+    <div class="page-header">
+      <div class="page-header-content">
+        <h1 class="page-title">${appId}</h1>
+        <p class="page-description">在此应用的同步凭证管理。</p>
       </div>
-      ${err && html`<div class="field-error">${err}</div>`}
-      <button class="btn btn-primary" type="submit" disabled=${busy}>${busy ? '生成中…' : '生成新 Token'}</button>
-    </form>
+    </div>
 
-    <h2>我名下的 Token</h2>
-    ${tokens === null && html`<p class="muted">加载中…</p>`}
-    ${tokens && tokens.length === 0 && html`<p class="muted">还没有 Token。生成一个用于同步软件。</p>`}
-    ${tokens && tokens.length > 0 && html`
-      <table>
-        <thead><tr><th>标签</th><th>前缀</th><th>创建时间</th><th>最后使用</th><th></th></tr></thead>
-        <tbody>
-          ${tokens.map((t) => html`
-            <tr key=${t.token_prefix}>
-              <td data-label="标签">${t.label || '未命名'}</td>
-              <td data-label="前缀"><code>${t.token_prefix}…</code></td>
-              <td data-label="创建时间">${fmtTime(t.created_at)}</td>
-              <td data-label="最后使用">${t.last_used_at ? fmtTime(t.last_used_at) : '从未'}</td>
-              <td data-label="操作">
-                ${confirmDel === t.token_prefix
-                  ? html`<span class="btn-row">确认撤销？<button class="btn btn-danger" onClick=${() => revoke(t.token_prefix)}>确认</button><button class="btn" onClick=${() => setConfirmDel(null)}>取消</button></span>`
-                  : html`<button class="btn btn-danger" onClick=${() => setConfirmDel(t.token_prefix)}>撤销</button>`}
-              </td>
-            </tr>
-          `)}
-        </tbody>
-      </table>
-    `}
+    <div class="card">
+      <h3 style="margin-top:0">新建 Token</h3>
+      <form class="form form-wide" onSubmit=${create}>
+        <div class="form-row-inline">
+          <div class="form-row">
+            <label for="label">标签（可选）</label>
+            <input id="label" type="text" placeholder="如 MacBook Air"
+                   value=${label} onInput=${(e) => setLabel(e.target.value)} />
+            <span class="hint">便于在多台设备间区分。</span>
+          </div>
+          <div class="form-row" style="justify-content:flex-end">
+            <div class="form-actions">
+              <button class="btn btn-primary" type="submit" disabled=${creating}>
+                ${creating ? '生成中…' : '生成新 Token'}
+              </button>
+            </div>
+          </div>
+        </div>
+        ${errMsg && html`<div class="notice notice-danger"><span class="notice-icon">!</span>${errMsg}</div>`}
+      </form>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0">我名下的 Token</h3>
+      ${myTokens.length === 0
+        ? html`
+          <div class="empty" style="padding:32px 16px">
+            <div class="empty-icon" style="width:40px;height:40px;font-size:18px">○</div>
+            <div class="empty-title" style="font-size:14px">还没有 Token</div>
+            <div class="empty-desc">生成一个 token 粘到软件客户端即可启用同步。</div>
+          </div>
+        `
+        : html`
+          <div class="table-wrap" style="margin:0">
+            <table class="table">
+              <thead>
+                <tr><th>标签</th><th>前缀</th><th>创建时间</th><th>最后使用</th><th></th></tr>
+              </thead>
+              <tbody>
+                ${myTokens.map((t) => html`
+                  <tr key=${t.token_prefix}>
+                    <td data-label="标签">${t.label || html`<span class="loading-text">未命名</span>`}</td>
+                    <td data-label="前缀"><code>${t.token_prefix}…</code></td>
+                    <td data-label="创建时间" class="muted">${fmtTime(t.created_at)}</td>
+                    <td data-label="最后使用" class="muted">${t.last_used_at ? fmtTime(t.last_used_at) : '从未'}</td>
+                    <td class="table-actions">
+                      ${confirmDel === t.token_prefix
+                        ? html`<span class="btn-row">
+                            <span style="color:var(--danger);font-size:13px">确认撤销？</span>
+                            <button class="btn btn-sm btn-danger" onClick=${() => revoke(t.token_prefix)}>确认</button>
+                            <button class="btn btn-sm" onClick=${() => setConfirmDel(null)}>取消</button>
+                          </span>`
+                        : html`<button class="btn btn-sm btn-danger" onClick=${() => setConfirmDel(t.token_prefix)}>撤销</button>`}
+                    </td>
+                  </tr>
+                `)}
+              </tbody>
+            </table>
+          </div>
+        `}
+    </div>
   `;
 }
 
+// ============================================================
+// MyQuota
+// ============================================================
+function MyQuota() {
+  const { data, err, loading } = useApi('GET', '/api/v1/me/quota');
+  if (err) return html`<${ErrorBox} err=${err} />`;
+  if (loading) return html`<div class="loading-text">加载中…</div>`;
+
+  const used = data?.storage_used_bytes || 0;
+  const limit = data?.storage_limit_bytes || 1;
+  const tokenCount = data?.app_token_count || 0;
+  const tokenLimit = data?.app_token_limit || 0;
+  const pct = Math.min(100, Math.round((used / limit) * 100));
+  const fillClass = pct >= 95 ? 'danger' : pct >= 80 ? 'warn' : '';
+
+  return html`
+    <nav class="breadcrumb">
+      <a href="/me" onClick=${(e) => { e.preventDefault(); navigate('/me'); }}>配额</a>
+    </nav>
+    <div class="page-header">
+      <div class="page-header-content">
+        <h1 class="page-title">我的配额</h1>
+        <p class="page-description">查看你的存储与 token 使用情况。</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div>
+          <div class="card-title">存储用量</div>
+          <div class="card-meta">所有应用当前 payload 字节总和</div>
+        </div>
+        <span class="badge ${pct >= 95 ? 'badge-danger' : pct >= 80 ? 'badge-warning' : ''}">${pct}%</span>
+      </div>
+      <div class="quota-bar">
+        <div class=${'quota-bar-fill ' + fillClass} style=${'width:' + pct + '%'}></div>
+      </div>
+      <div class="quota-stats">
+        <span>已用 <strong>${humanBytes(used)}</strong></span>
+        <span>上限 <strong>${humanBytes(limit)}</strong></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div>
+          <div class="card-title">App Token</div>
+          <div class="card-meta">你已为多少个应用申请了同步凭证</div>
+        </div>
+        <span class="badge">${tokenCount} / ${tokenLimit}</span>
+      </div>
+      <p class="loading-text" style="margin:0">
+        数量受管理员配置的 <code>USER_APP_TOKEN_LIMIT</code> 限制。每个 (你, app_id) 只能有一个有效 token；再次申请会让旧 token 失效。
+      </p>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0">各应用占用</h3>
+      <p class="loading-text" style="margin:0">
+        按 app 维度的占用明细尚未在 WebUI 暴露。如需查看具体数据，请联系管理员或参考 <code>/api/v1/me/quota</code> 接口。
+      </p>
+    </div>
+  `;
+}
+
+// ============================================================
+// MySettings
+// ============================================================
+function MySettings() {
+
+  const user = userSignal.value;
+  return html`
+    <nav class="breadcrumb">
+      <a href="/me/settings" onClick=${(e) => { e.preventDefault(); navigate('/me/settings'); }}>设置</a>
+    </nav>
+    <div class="page-header">
+      <div class="page-header-content">
+        <h1 class="page-title">账号设置</h1>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0">账号信息</h3>
+      <dl style="margin:0;display:grid;grid-template-columns:120px 1fr;gap:8px 16px">
+        <dt class="loading-text">邮箱</dt><dd style="margin:0">${user ? user.email : ''}</dd>
+        <dt class="loading-text">角色</dt><dd style="margin:0">${user && user.is_admin ? html`<span class="badge badge-primary">管理员</span>` : html`<span class="badge">普通用户</span>`}</dd>
+        <dt class="loading-text">用户 ID</dt><dd style="margin:0" class="mono" title=${user ? user.id : ''}>${user ? (user.id || '').slice(0, 16) + '…' : ''}</dd>
+      </dl>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0">会话</h3>
+      <p class="loading-text">Token 存于浏览器 localStorage，登出后会立即失效。</p>
+      <button class="btn btn-danger" onClick=${logout}>退出登录</button>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0">修改密码</h3>
+      <p class="loading-text">该功能尚未提供。如需修改请联系管理员通过 SQL 重置 <code>password_hash</code>。</p>
+    </div>
+  `;
+}
+
+// ============================================================
+// ShowToken (one-time display after creation)
+// ============================================================
 function ShowToken({ appId, token }) {
   useEffect(() => {
     const guard = (e) => { e.preventDefault(); e.returnValue = ''; };
@@ -426,152 +809,147 @@ function ShowToken({ appId, token }) {
     try {
       await navigator.clipboard.writeText(token);
       showToast('ok', '已复制到剪贴板');
-    } catch {
-      showToast('err', '复制失败，请手动选择');
-    }
+    } catch { showToast('err', '复制失败，请手动选中'); }
   };
 
-  // Build a cfgsync1:<base64url-json> connect string bundling server URL,
-  // app_id, and token. Designed for the 1Remote client's connect-string
-  // input. The wire format matches Ui/Service/Cloud/ConnectString.cs
-  // (RFC 4648 §5 base64url, no padding; JSON field order v, url, app_id,
-  // token — same as C#'s anonymous-type serialization).
+  // Connect-string version: bundles server URL, app_id, and token for the
+  // 1Remote client (see its ConnectString.Parse / CloudSyncService).
   const copyConnect = async () => {
-    const json = JSON.stringify({
-      v: 1,
-      url: location.origin,
-      app_id: appId,
-      token: token,
-    });
+    const json = JSON.stringify({ v: 1, url: location.origin, app_id: appId, token });
     const b64 = btoa(json).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
     const cs = 'cfgsync1:' + b64;
     try {
       await navigator.clipboard.writeText(cs);
       showToast('ok', '已复制为接入串');
-    } catch {
-      showToast('err', '复制失败，请手动选择');
-    }
+    } catch { showToast('err', '复制失败，请手动选中'); }
   };
 
   return html`
-    <h1>新 Token</h1>
-    <div class="warning">⚠️ 请立即复制此 token。离开此页面后将无法再看到完整 token。</div>
-    <p class="card-meta">app_id: ${appId}</p>
-    <div class="code">${token}</div>
-    <div class="btn-row" style="margin-top:16px">
-      <button class="btn btn-primary" onClick=${copy}>复制</button>
-      <button class="btn" onClick=${copyConnect}>复制为接入串</button>
-      <a class="btn" href=${'/apps/' + appId} onClick=${(e) => { e.preventDefault(); navigate('/apps/' + appId); }}>我已保存，去应用详情</a>
-    </div>
-    <p class="muted" style="text-align:left;padding:12px 0 0;font-size:12px">
-      「复制为接入串」会同时打包服务器地址、app_id 和 token。在 1Remote 桌面客户端的「设置 → 云端同步」粘贴这一串即可完成接入，无需分别填写。
-    </p>
-  `;
-}
-
-function MyQuota() {
-  const [quota, setQuota] = useState(null);
-  const [err, setErr] = useState(null);
-  useEffect(() => {
-    call('GET', '/api/v1/me/quota')
-      .then(setQuota)
-      .catch((e) => setErr(e.message));
-  }, []);
-  if (err) return html`<p class="error-text">${err}</p>`;
-  if (!quota) return html`<p class="muted">加载中…</p>`;
-
-  const used = quota.storage_used_bytes || 0;
-  const limit = quota.storage_limit_bytes || 1;
-  const pct = Math.min(100, Math.round((used / limit) * 100));
-  return html`
-    <h1>我的配额</h1>
-    <div class="card">
-      <div>存储已用 ${humanBytes(used)} / ${humanBytes(limit)}（${pct}%）</div>
-      <div style="background:var(--border);height:8px;border-radius:4px;margin-top:8px;overflow:hidden">
-        <div style=${'background:var(--primary);height:100%;width:' + pct + '%'}></div>
+    <div class="main main-narrow">
+      <nav class="breadcrumb">
+        <a href="/apps/${appId}" onClick=${(e) => { e.preventDefault(); navigate('/apps/' + appId); }}>${appId}</a>
+        <span class="breadcrumb-sep">/</span>
+        <span class="breadcrumb-current">新 Token</span>
+      </nav>
+      <div class="page-header">
+        <div class="page-header-content">
+          <h1 class="page-title">新 Token 已生成</h1>
+          <p class="page-description">立即复制保存，离开此页面后将无法再次看到完整 token。</p>
+        </div>
       </div>
-      <div class="muted" style="text-align:left;padding:8px 0 0">App Token：${quota.app_token_count || 0} / ${quota.app_token_limit || 0}</div>
+
+      <div class="notice notice-warning">
+        <span class="notice-icon">⚠</span>
+        <span><strong>仅显示一次</strong>。页面刷新或离开后无法找回，请妥善保存。</span>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">App</div>
+          <span class="badge mono">${appId}</span>
+        </div>
+        <div class="card-title" style="margin-bottom:8px">Token</div>
+        <div class="code-block lg" onClick=${(e) => e.target.select && e.target.select()}>${token}</div>
+        <div class="btn-row" style="margin-top:16px">
+          <button class="btn btn-primary" onClick=${copy}>复制 token</button>
+          <button class="btn" onClick=${copyConnect}>复制为接入串</button>
+        </div>
+        <p class="loading-text" style="margin-top:12px">
+          「复制为接入串」会把 URL、app_id、token 一起打包，1Remote 客户端可直接粘贴。
+        </p>
+      </div>
+
+      <div class="btn-row-right" style="margin-top:16px">
+        <a class="btn" href=${'/apps/' + appId}
+           onClick=${(e) => { e.preventDefault(); navigate('/apps/' + appId); }}>我已保存</a>
+      </div>
     </div>
-    <p class="muted">各应用占用明细暂未提供。如需查看某 app 的配置，请到"我的应用"中进入对应详情。</p>
   `;
 }
 
-function MySettings() {
-  return html`
-    <h1>设置</h1>
-    <p class="muted">修改密码功能尚未提供。如需修改请联系管理员。</p>
-    <h2>退出登录</h2>
-    <button class="btn btn-danger" onClick=${logout}>退出</button>
-  `;
-}
-
+// ============================================================
+// Admin: Apps
+// ============================================================
 function AdminApps() {
-  const [apps, setApps] = useState(null);
-  const [err, setErr] = useState(null);
-  const load = () => {
-    setApps(null);
-    call('GET', '/api/v1/admin/apps')
-      .then((d) => setApps(d.apps || []))
-      .catch((e) => setErr(e.message));
-  };
-  useEffect(load, []);
-  if (err) return html`<p class="error-text">${err}</p>`;
-  if (!apps) return html`<p class="muted">加载中…</p>`;
+
+  const { data, err, loading } = useApi('GET', '/api/v1/admin/apps');
+  if (err) return html`<${ErrorBox} err=${err} />`;
+  if (loading) return html`<div class="loading-text">加载中…</div>`;
+  const apps = data?.apps || [];
+
   return html`
-    <div class="btn-row" style="justify-content:space-between;margin-bottom:16px">
-      <h1 style="margin:0">应用管理</h1>
-      <button class="btn btn-primary" onClick=${() => navigate('/admin/apps/new')}>新建应用</button>
+    <nav class="breadcrumb">
+      <a href="/admin/apps" onClick=${(e) => { e.preventDefault(); navigate('/admin/apps'); }}>应用管理</a>
+    </nav>
+    <div class="page-header">
+      <div class="page-header-content">
+        <h1 class="page-title">应用管理</h1>
+        <p class="page-description">注册新的 app_id 或编辑现有应用。</p>
+      </div>
+      <button class="btn btn-primary" onClick=${() => navigate('/admin/apps/new')}>+ 新建应用</button>
     </div>
+
     ${apps.length === 0
-      ? html`<p class="muted">还没有任何应用。</p>`
+      ? html`
+        <div class="empty">
+          <div class="empty-icon">+</div>
+          <div class="empty-title">还没有任何应用</div>
+          <div class="empty-desc">先注册一个 app_id，用户才能申请 token 开始同步。</div>
+          <div class="empty-cta">
+            <button class="btn btn-primary" onClick=${() => navigate('/admin/apps/new')}>新建应用</button>
+          </div>
+        </div>
+      `
       : html`
-        <table>
-          <thead><tr><th>app_id</th><th>显示名</th><th>描述</th><th>创建时间</th><th></th></tr></thead>
-          <tbody>
-            ${apps.map((a) => html`
-              <tr key=${a.app_id}>
-                <td data-label="app_id"><code>${a.app_id}</code></td>
-                <td data-label="显示名">${a.display_name}</td>
-                <td data-label="描述">${a.description || ''}</td>
-                <td data-label="创建时间">${fmtTime(a.created_at)}</td>
-                <td data-label="操作">
-                  <a class="btn" href=${'/admin/apps/' + a.app_id} onClick=${(e) => { e.preventDefault(); navigate('/admin/apps/' + a.app_id); }}>编辑</a>
-                </td>
-              </tr>
-            `)}
-          </tbody>
-        </table>
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr><th>app_id</th><th>显示名</th><th>描述</th><th>创建时间</th><th></th></tr>
+            </thead>
+            <tbody>
+              ${apps.map((a) => html`
+                <tr key=${a.app_id}>
+                  <td data-label="app_id"><code>${a.app_id}</code></td>
+                  <td data-label="显示名">${a.display_name}</td>
+                  <td data-label="描述" class="muted" style="max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${a.description || '—'}</td>
+                  <td data-label="创建时间" class="muted">${fmtTime(a.created_at)}</td>
+                  <td class="table-actions">
+                    <a class="btn btn-sm" href=${'/admin/apps/' + a.app_id}
+                       onClick=${(e) => { e.preventDefault(); navigate('/admin/apps/' + a.app_id); }}>编辑</a>
+                  </td>
+                </tr>
+              `)}
+            </tbody>
+          </table>
+        </div>
       `}
   `;
 }
 
+// ============================================================
+// Admin: AppEdit (new + edit)
+// ============================================================
 function AdminAppEdit({ mode, appId }) {
   const isNew = mode === 'new';
   const [appId_, setAppId] = useState(appId || '');
   const [displayName, setDisplayName] = useState('');
   const [description, setDescription] = useState('');
-  const [confirmDel, setConfirmDel] = useState(false);
   const [err, setErr] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [confirmDel, setConfirmDel] = useState(false);
+  const [loaded, setLoaded] = useState(isNew);
 
   useEffect(() => {
     if (isNew) return;
-    call('GET', `/api/v1/admin/apps/${appId}`)
-      .then((a) => { setDisplayName(a.display_name); setDescription(a.description || ''); })
-      .catch((e) => {
-        if (e.status === 404) {
-          showToast('err', '应用已被删除');
-          navigate('/admin/apps');
-        } else {
-          setErr(e.message);
-        }
-      });
+    call('GET', `/api/v1/admin/apps/${appId}`).then(
+      (a) => { setAppId(a.app_id); setDisplayName(a.display_name); setDescription(a.description || ''); setLoaded(true); },
+      (e) => { setErr(e.message); setLoaded(true); }
+    );
   }, [appId]);
 
   const submit = async (e) => {
     e.preventDefault();
-    setBusy(true);
-    setErr(null);
+    setBusy(true); setErr(null);
     try {
       if (isNew) {
         await call('POST', '/api/v1/admin/apps', { app_id: appId_, display_name: displayName, description });
@@ -582,117 +960,167 @@ function AdminAppEdit({ mode, appId }) {
         showToast('ok', '已保存');
         navigate('/admin/apps');
       }
-    } catch (e) {
-      setErr(e.message);
-    } finally {
-      setBusy(false);
-    }
+    } catch (e) { setErr(e.message); setBusy(false); }
   };
 
   const del = async () => {
-    setBusy(true);
-    setErr(null);
+    setBusy(true); setErr(null);
     try {
       await call('DELETE', `/api/v1/admin/apps/${appId}`);
       showToast('ok', '已删除');
       navigate('/admin/apps');
-    } catch (e) {
-      setErr(e.message);
-    } finally {
-      setBusy(false);
-    }
+    } catch (e) { setErr(e.message); setBusy(false); }
   };
 
+  if (!loaded) return html`<div class="loading-text">加载中…</div>`;
+
   return html`
-    <h1>${isNew ? '新建应用' : '编辑应用'}</h1>
-    <form class="form" onSubmit=${submit}>
-      <div>
-        <label>app_id（反域格式，如 com.example.app）</label>
-        <input
-          value=${appId_}
-          onInput=${(e) => setAppId(e.target.value)}
-          disabled=${!isNew}
-          required
-          pattern="^([a-z0-9][a-z0-9-]{1,30}\\.)+[a-z0-9][a-z0-9-]{1,30}$"
-        />
+    <nav class="breadcrumb">
+      <a href="/admin/apps" onClick=${(e) => { e.preventDefault(); navigate('/admin/apps'); }}>应用管理</a>
+      <span class="breadcrumb-sep">/</span>
+      <span class="breadcrumb-current">${isNew ? '新建' : appId}</span>
+    </nav>
+    <div class="page-header">
+      <div class="page-header-content">
+        <h1 class="page-title">${isNew ? '新建应用' : '编辑应用'}</h1>
+        <p class="page-description">${isNew ? '注册一个新的 app_id' : '修改显示名或描述'}</p>
       </div>
-      <div>
-        <label>显示名（必填，≤ 256 字符）</label>
-        <input value=${displayName} onInput=${(e) => setDisplayName(e.target.value)} required maxLength="256" />
+    </div>
+
+    <form class="card" onSubmit=${submit} novalidate>
+      <div class="form form-wide">
+        <div class="form-row">
+          <label for="appid">app_id</label>
+          <input id="appid" type="text" required disabled=${!isNew}
+                 value=${appId_} onInput=${(e) => setAppId(e.target.value)}
+                 pattern=${APP_ID_PATTERN} />
+          <span class="hint">反域格式，如 <code>com.example.myapp</code>。创建后不可修改。</span>
+        </div>
+        <div class="form-row">
+          <label for="dname">显示名</label>
+          <input id="dname" type="text" required maxLength="256"
+                 value=${displayName} onInput=${(e) => setDisplayName(e.target.value)} />
+          <span class="hint">在 WebUI 列表中显示的友好名称。</span>
+        </div>
+        <div class="form-row">
+          <label for="desc">描述（可选）</label>
+          <textarea id="desc" rows="3" maxLength="1024"
+                    value=${description} onInput=${(e) => setDescription(e.target.value)}></textarea>
+        </div>
+        ${err && html`<div class="notice notice-danger"><span class="notice-icon">!</span>${err}</div>`}
+        <div class="form-actions">
+          <button class="btn btn-primary" type="submit" disabled=${busy}>
+            ${busy ? '保存中…' : '保存'}
+          </button>
+          <a class="btn" href="/admin/apps"
+             onClick=${(e) => { e.preventDefault(); navigate('/admin/apps'); }}>取消</a>
+        </div>
       </div>
-      <div>
-        <label>描述（≤ 1024 字符）</label>
-        <textarea rows="3" value=${description} onInput=${(e) => setDescription(e.target.value)} maxLength="1024"></textarea>
-      </div>
-      ${err && html`<div class="field-error">${err}</div>`}
-      <button class="btn btn-primary" type="submit" disabled=${busy}>${busy ? '保存中…' : '保存'}</button>
     </form>
+
     ${!isNew && html`
-      <h2>删除应用</h2>
-      ${confirmDel
-        ? html`
-          <div class="warning">确认删除 ${appId}？这会级联删除所有用户在此 app 下的所有数据（config / 历史 / token），无法恢复。</div>
-          <div class="btn-row">
-            <button class="btn btn-danger" onClick=${del} disabled=${busy}>确认删除</button>
-            <button class="btn" onClick=${() => setConfirmDel(false)}>取消</button>
-          </div>
-        `
-        : html`<button class="btn btn-danger" onClick=${() => setConfirmDel(true)}>删除此应用</button>`}
+      <div class="card">
+        <h3 style="margin-top:0">删除应用</h3>
+        ${confirmDel
+          ? html`
+            <div class="notice notice-danger">
+              <span class="notice-icon">!</span>
+              <div>
+                <div><strong>确认删除 ${appId}？</strong></div>
+                <div>这会级联删除所有用户在该 app 下的所有数据（配置、历史、token），无法恢复。</div>
+              </div>
+            </div>
+            <div class="btn-row">
+              <button class="btn btn-danger" disabled=${busy} onClick=${del}>确认删除</button>
+              <button class="btn" onClick=${() => setConfirmDel(false)}>取消</button>
+            </div>
+          `
+          : html`
+            <p class="loading-text">删除后无法恢复。建议先通知所有使用此 app 的用户。</p>
+            <button class="btn btn-danger" onClick=${() => setConfirmDel(true)}>删除此应用</button>
+          `}
+      </div>
     `}
   `;
 }
 
+// ============================================================
+// Admin: Users
+// ============================================================
 function AdminUsers() {
-  const [data, setData] = useState(null);
-  const [err, setErr] = useState(null);
+
   const [offset, setOffset] = useState(0);
   const limit = 20;
+  const path = `/api/v1/admin/users?limit=${limit}&offset=${offset}`;
+  const { data, err, loading } = useApi('GET', path, [offset]);
 
-  const load = () => {
-    setData(null);
-    call('GET', `/api/v1/admin/users?limit=${limit}&offset=${offset}`)
-      .then(setData)
-      .catch((e) => setErr(e.message));
-  };
-  useEffect(load, [offset]);
+  if (err) return html`<${ErrorBox} err=${err} />`;
+  if (loading) return html`<div class="loading-text">加载中…</div>`;
+
+  const users = data?.users || [];
+  const total = users.length < limit ? offset + users.length : offset + limit + 1;
+  const page = Math.floor(offset / limit) + 1;
+  const hasPrev = offset > 0;
+  const hasNext = users.length === limit;
 
   const promote = async (id) => {
     try {
       await call('POST', `/api/v1/admin/users/${id}/promote`);
       showToast('ok', '已提升为管理员');
-      load();
-    } catch (e) {
-      showToast('err', e.message);
-    }
+      // Trigger reload by toggling offset (force useEffect re-run via dep).
+      setOffset((o) => o);
+      // No state change; force reload by incrementing via a tick. We just re-render.
+      // Simpler: navigate to same path forces reload via key trick — use a re-key
+      // by navigating to self with a query string. But simpler is to just reload
+      // via setting offset briefly.
+      setOffset((o) => o);
+    } catch (e) { showToast('err', e.message); }
   };
 
-  if (err) return html`<p class="error-text">${err}</p>`;
-  if (!data) return html`<p class="muted">加载中…</p>`;
-
   return html`
-    <h1>用户管理</h1>
-    <table>
-      <thead><tr><th>邮箱</th><th>ID</th><th>角色</th><th>创建时间</th><th></th></tr></thead>
-      <tbody>
-        ${data.users.map((u) => html`
-          <tr key=${u.id}>
-            <td data-label="邮箱">${u.email}</td>
-            <td data-label="ID"><code title=${u.id}>${u.id.slice(0, 8)}…</code></td>
-            <td data-label="角色">${u.is_admin ? html`<span style="color:var(--success)">管理员</span>` : '普通用户'}</td>
-            <td data-label="创建时间">${fmtTime(u.created_at)}</td>
-            <td data-label="操作">
-              ${u.is_admin
-                ? html`<span class="muted" style="font-size:12px">已是管理员</span>`
-                : html`<button class="btn" onClick=${() => promote(u.id)}>提升为管理员</button>`}
-            </td>
-          </tr>
-        `)}
-      </tbody>
-    </table>
-    <div class="btn-row" style="margin-top:16px">
-      <button class="btn" disabled=${offset === 0} onClick=${() => setOffset(Math.max(0, offset - limit))}>上一页</button>
-      <span class="muted">第 ${Math.floor(offset / limit) + 1} 页</span>
-      <button class="btn" disabled=${data.users.length < limit} onClick=${() => setOffset(offset + limit)}>下一页</button>
+    <nav class="breadcrumb">
+      <a href="/admin/users" onClick=${(e) => { e.preventDefault(); navigate('/admin/users'); }}>用户管理</a>
+    </nav>
+    <div class="page-header">
+      <div class="page-header-content">
+        <h1 class="page-title">用户管理</h1>
+        <p class="page-description">查看所有用户，提升管理员权限。</p>
+      </div>
+    </div>
+
+    <div class="table-wrap">
+      <table class="table">
+        <thead>
+          <tr><th>邮箱</th><th>用户 ID</th><th>角色</th><th>创建时间</th><th></th></tr>
+        </thead>
+        <tbody>
+          ${users.length === 0
+            ? html`<tr><td colspan="5"><div class="table-empty">还没有用户</div></td></tr>`
+            : users.map((u) => html`
+              <tr key=${u.id}>
+                <td data-label="邮箱">${u.email}</td>
+                <td data-label="用户 ID" class="mono" title=${u.id}><code>${u.id.slice(0, 8)}…</code></td>
+                <td data-label="角色">${u.is_admin
+                  ? html`<span class="badge badge-primary">管理员</span>`
+                  : html`<span class="badge">普通用户</span>`}</td>
+                <td data-label="创建时间" class="muted">${fmtTime(u.created_at)}</td>
+                <td class="table-actions">
+                  ${u.is_admin
+                    ? html`<span class="loading-text">已是管理员</span>`
+                    : html`<button class="btn btn-sm" onClick=${() => promote(u.id)}>提升为管理员</button>`}
+                </td>
+              </tr>
+            `)}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="pagination">
+      <span class="pagination-info">第 ${page} 页</span>
+      <div class="btn-row">
+        <button class="btn btn-sm" disabled=${!hasPrev} onClick=${() => setOffset(Math.max(0, offset - limit))}>上一页</button>
+        <button class="btn btn-sm" disabled=${!hasNext} onClick=${() => setOffset(offset + limit)}>下一页</button>
+      </div>
     </div>
   `;
 }
@@ -701,16 +1129,24 @@ function AdminUsers() {
 // helpers
 // ============================================================
 function fmtTime(unix) {
-  if (!unix) return '';
+  if (!unix) return '—';
   const d = new Date(unix * 1000);
-  return d.toLocaleString('zh-CN', { hour12: false });
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mi = String(d.getMinutes()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd} ${hh}:${mi}`;
 }
 
 function humanBytes(n) {
-  if (n < 1024) return n + ' B';
-  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
-  return (n / 1024 / 1024).toFixed(2) + ' MB';
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(2)} MB`;
 }
+
+// Note: removed unused div() helper — htm uses 'class' not 'className' for
+// HTML elements, and `<div class="...">` is direct enough.
 
 // ============================================================
 // mount
