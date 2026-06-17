@@ -28,3 +28,10 @@ jobs:
 
       - name: go vet
         run: go vet ./...
+
+      - name: Syntax-check the WebUI bundle
+        # Catches mismatched template literals, missing brackets, etc. before
+        # the JS reaches a browser. Zero dependencies; node ships with
+        # GitHub Actions runners. Catches the bug that escaped v0.3.0:
+        # 'return html`<p>...';' (single quote instead of backtick).
+        run: node --check internal/webui/dist/assets/app.js
