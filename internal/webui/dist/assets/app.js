@@ -431,6 +431,28 @@ function ShowToken({ appId, token }) {
     }
   };
 
+  // Build a cfgsync1:<base64url-json> connect string bundling server URL,
+  // app_id, and token. Designed for the 1Remote client's connect-string
+  // input. The wire format matches Ui/Service/Cloud/ConnectString.cs
+  // (RFC 4648 §5 base64url, no padding; JSON field order v, url, app_id,
+  // token — same as C#'s anonymous-type serialization).
+  const copyConnect = async () => {
+    const json = JSON.stringify({
+      v: 1,
+      url: location.origin,
+      app_id: appId,
+      token: token,
+    });
+    const b64 = btoa(json).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const cs = 'cfgsync1:' + b64;
+    try {
+      await navigator.clipboard.writeText(cs);
+      showToast('ok', '已复制为接入串');
+    } catch {
+      showToast('err', '复制失败，请手动选择');
+    }
+  };
+
   return html`
     <h1>新 Token</h1>
     <div class="warning">⚠️ 请立即复制此 token。离开此页面后将无法再看到完整 token。</div>
@@ -438,8 +460,12 @@ function ShowToken({ appId, token }) {
     <div class="code">${token}</div>
     <div class="btn-row" style="margin-top:16px">
       <button class="btn btn-primary" onClick=${copy}>复制</button>
+      <button class="btn" onClick=${copyConnect}>复制为接入串</button>
       <a class="btn" href=${'/apps/' + appId} onClick=${(e) => { e.preventDefault(); navigate('/apps/' + appId); }}>我已保存，去应用详情</a>
     </div>
+    <p class="muted" style="text-align:left;padding:12px 0 0;font-size:12px">
+      「复制为接入串」会同时打包服务器地址、app_id 和 token。在 1Remote 桌面客户端的「设置 → 云端同步」粘贴这一串即可完成接入，无需分别填写。
+    </p>
   `;
 }
 
