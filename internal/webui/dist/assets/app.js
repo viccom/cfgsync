@@ -244,11 +244,12 @@ function App() {
   const user = userSignal.value;
   const jwt = jwtSignal.value;
 
-  // Auto-redirect: not logged in -> /login, non-admin hitting /admin -> /apps.
+  // Auto-redirect: not logged in -> /login, non-admin hitting /admin -> /apps,
+  // logged in but on /login or /register -> redirect to home.
   useEffect(() => {
     if (!jwt && path !== '/login' && path !== '/register' && path !== '/') {
       navigate('/login');
-    } else if (jwt && path === '/') {
+    } else if (jwt && (path === '/' || path === '/login' || path === '/register')) {
       navigate(user && user.is_admin ? '/admin/apps' : '/apps');
     } else if (jwt && segments[0] === 'admin' && !(user && user.is_admin)) {
       showToast('err', '需要管理员权限');
