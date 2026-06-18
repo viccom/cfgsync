@@ -13,6 +13,7 @@ import (
 
 	"github.com/viccom/cfgsync/internal/config"
 	"github.com/viccom/cfgsync/internal/db"
+	"github.com/viccom/cfgsync/internal/repo"
 	"github.com/viccom/cfgsync/internal/server"
 )
 
@@ -59,9 +60,14 @@ func main() {
 		log.Printf("bootstrap admin ensured: %s", cfg.BootstrapAdminEmail)
 	}
 
+	repository, err := repo.New(cfg.RepoDir)
+	if err != nil {
+		log.Fatalf("open repo: %v", err)
+	}
+
 	srv := &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           server.New(cfg, database),
+		Handler:           server.New(cfg, database, repository),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,

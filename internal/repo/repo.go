@@ -57,11 +57,13 @@ type StageResult struct {
 //   {root}/_staging/{app_id}/{version}/package.sha256
 // Caller validates the manifest, then Promote()s the staging directory to
 // its final location. On any failure caller must Discard(stagingDir).
+//
+// At entry, Stage wipes the entire {root}/_staging/{app_id}/ subtree so a
+// previously failed upload for the same app (regardless of version) does
+// not leak into the new attempt.
 func (r *Repo) Stage(appID, version string, body io.Reader, maxBytes int64) (StageResult, error) {
 	staging := r.stagingPath(appID, version)
-	// Remove any stale staging from a previous failed attempt at this
-	// (app_id, version) — keeps Promote's invariants simple.
-	_ = os.RemoveAll(staging)
+	_ = os.RemoveAll(filepath.Dir(staging))
 	if err := os.MkdirAll(staging, 0o700); err != nil {
 		return StageResult{}, fmt.Errorf("mkdir staging: %w", err)
 	}

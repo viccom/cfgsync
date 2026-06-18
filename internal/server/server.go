@@ -10,11 +10,12 @@ import (
 	"github.com/viccom/cfgsync/internal/auth"
 	"github.com/viccom/cfgsync/internal/config"
 	"github.com/viccom/cfgsync/internal/handler"
+	"github.com/viccom/cfgsync/internal/repo"
 	"github.com/viccom/cfgsync/internal/webui"
 )
 
 // New builds the top-level HTTP handler.
-func New(cfg *config.Config, db *sql.DB) http.Handler {
+func New(cfg *config.Config, db *sql.DB, repo *repo.Repo) http.Handler {
 	mux := http.NewServeMux()
 
 	// Public
@@ -46,6 +47,13 @@ func New(cfg *config.Config, db *sql.DB) http.Handler {
 	mux.Handle("DELETE /api/v1/admin/apps/{app_id}", adminChain(handler.AdminDeleteApp(db)))
 	mux.Handle("POST /api/v1/admin/users/{user_id}/promote", adminChain(handler.AdminPromoteUser(db)))
 	mux.Handle("GET /api/v1/admin/users", adminChain(handler.AdminListUsers(db)))
+
+	// Developer (UserMW + AdminMW) — release upload / management.
+	// Single-developer mode per design decision 1: admin is the only publisher.
+	mux.Handle("POST /api/v1/dev/apps/{app_id}/releases", adminChain(handler.UploadRelease(db, cfg, repo)))
+	mux.Handle("PUT /api/v1/dev/apps/{app_id}/releases/{version}", adminChain(handler.OverwriteRelease(db, cfg, repo)))
+	mux.Handle("GET /api/v1/dev/apps/{app_id}/releases", adminChain(handler.ListDevReleases(db)))
+	mux.Handle("DELETE /api/v1/dev/apps/{app_id}/releases/{version}", adminChain(handler.DeleteRelease(db, repo)))
 
 	// App token (AppTokenMW)
 	mux.Handle("GET /api/v1/apps/{app_id}/config", auth.AppTokenMW(db, handler.GetConfig(db)))

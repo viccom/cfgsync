@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/viccom/cfgsync/internal/auth"
 	"github.com/viccom/cfgsync/internal/config"
 	"github.com/viccom/cfgsync/internal/db"
+	"github.com/viccom/cfgsync/internal/repo"
 )
 
 // TestChain_PanicPropagatesStatusToLog verifies that when an inner handler panics,
@@ -93,7 +95,7 @@ func TestServer_AdminListUsers_RouteIsWired(t *testing.T) {
 	adminTok, _ := auth.IssueAccess(cfg.JWTSecret, "admin-id", "admin@example.com", true, cfg.AccessTTL)
 	userTok, _ := auth.IssueAccess(cfg.JWTSecret, "user-id", "u@example.com", false, cfg.AccessTTL)
 
-	h := New(cfg, env)
+	h := New(cfg, env, openTempRepo(t))
 
 	// Non-admin → 403.
 	w := doReqSimple(t, h, "GET", "/api/v1/admin/users", userTok, nil)
@@ -137,6 +139,17 @@ func openTempDB(t *testing.T) *sql.DB {
 	return d
 }
 
+// openTempRepo creates a Repo rooted at a fresh temp dir so each test
+// gets its own on-disk package store (avoiding cross-test bleed).
+func openTempRepo(t *testing.T) *repo.Repo {
+	t.Helper()
+	r, err := repo.New(filepath.Join(t.TempDir(), "repo"))
+	if err != nil {
+		t.Fatalf("repo.New: %v", err)
+	}
+	return r
+}
+
 func mustExec(t *testing.T, d *sql.DB, q string, args ...interface{}) {
 	t.Helper()
 	if _, err := d.Exec(q, args...); err != nil {
@@ -174,7 +187,7 @@ func TestServer_WebUI_ServesIndexOnRoot(t *testing.T) {
 		MaxPayloadBytes:   4 * 1024 * 1024,
 		AppTokenPrefix:    "1rc_",
 	}
-	h := New(cfg, env)
+	h := New(cfg, env, openTempRepo(t))
 	w := doReqSimple(t, h, "GET", "/", "", nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)
@@ -198,7 +211,7 @@ func TestServer_WebUI_APIRouteNotShadowed(t *testing.T) {
 		MaxPayloadBytes:   4 * 1024 * 1024,
 		AppTokenPrefix:    "1rc_",
 	}
-	h := New(cfg, env)
+	h := New(cfg, env, openTempRepo(t))
 	w := doReqSimple(t, h, "GET", "/api/v1/health", "", nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", w.Code)

@@ -100,6 +100,15 @@ func GenerateDefaultConfig(path string) (adminPassword string, err error) {
 		"# MAX_PAYLOAD_BYTES=4194304",
 		"# APP_TOKEN_PREFIX=1rc_",
 		"",
+		"# App market module (defaults shown).",
+		"# REPO_DIR=./repo",
+		"# MAX_PACKAGE_BYTES=209715200",
+		"# MAX_MANIFEST_BYTES=65536",
+		"# MAX_DOC_BYTES=1048576",
+		"# MAX_ICON_BYTES=262144",
+		"# MAX_SCREENSHOT_BYTES=2097152",
+		"# MAX_SCREENSHOTS=12",
+		"",
 	}, "\n")
 
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {

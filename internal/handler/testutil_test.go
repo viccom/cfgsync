@@ -7,18 +7,21 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/viccom/cfgsync/internal/auth"
 	"github.com/viccom/cfgsync/internal/config"
 	"github.com/viccom/cfgsync/internal/db"
+	"github.com/viccom/cfgsync/internal/repo"
 )
 
-// testEnv bundles a temp DB and a test config.
+// testEnv bundles a temp DB, repo, and a test config.
 type testEnv struct {
-	db  *sql.DB
-	cfg *config.Config
+	db   *sql.DB
+	cfg  *config.Config
+	repo *repo.Repo
 }
 
 func newTestEnv(t *testing.T) *testEnv {
@@ -41,19 +44,30 @@ func newTestEnv(t *testing.T) *testEnv {
 		os.Remove(tmp.Name() + "-wal")
 		os.Remove(tmp.Name() + "-shm")
 	})
-	cfg := &config.Config{
-		Listen:            ":0",
-		DBPath:            "test.db",
-		JWTSecret:         []byte("test-secret-test-secret-test-secret"),
-		AccessTTL:         time.Hour,
-		RefreshTTL:        30 * 24 * time.Hour,
-		UserStorageLimit:  100 * 1024 * 1024,
-		UserAppTokenLimit: 100,
-		HistoryPerApp:     50,
-		MaxPayloadBytes:   4 * 1024 * 1024,
-		AppTokenPrefix:    "1rc_",
+	r, err := repo.New(filepath.Join(t.TempDir(), "repo"))
+	if err != nil {
+		t.Fatalf("repo.New: %v", err)
 	}
-	return &testEnv{db: d, cfg: cfg}
+	cfg := &config.Config{
+		Listen:             ":0",
+		DBPath:             "test.db",
+		JWTSecret:          []byte("test-secret-test-secret-test-secret"),
+		AccessTTL:          time.Hour,
+		RefreshTTL:         30 * 24 * time.Hour,
+		UserStorageLimit:   100 * 1024 * 1024,
+		UserAppTokenLimit:  100,
+		HistoryPerApp:      50,
+		MaxPayloadBytes:    4 * 1024 * 1024,
+		AppTokenPrefix:     "1rc_",
+		RepoDir:            r.Root(),
+		MaxPackageBytes:    10 * 1024 * 1024,
+		MaxManifestBytes:   64 * 1024,
+		MaxDocBytes:        1024 * 1024,
+		MaxIconBytes:       256 * 1024,
+		MaxScreenshotBytes: 2 * 1024 * 1024,
+		MaxScreenshots:     12,
+	}
+	return &testEnv{db: d, cfg: cfg, repo: r}
 }
 
 // seedUser inserts a user and returns their id.

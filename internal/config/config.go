@@ -23,6 +23,15 @@ type Config struct {
 	HistoryPerApp     int
 	MaxPayloadBytes   int
 	AppTokenPrefix    string
+
+	// App market module (v3). All have sensible defaults; tuned via env.
+	RepoDir            string
+	MaxPackageBytes    int64
+	MaxManifestBytes   int
+	MaxDocBytes        int
+	MaxIconBytes       int
+	MaxScreenshotBytes int
+	MaxScreenshots     int
 }
 
 // Load reads configuration from the environment. Before reading env vars, it
@@ -59,6 +68,14 @@ func Load() (*Config, error) {
 		HistoryPerApp:     int(getInt64("HISTORY_PER_APP", 50)),
 		MaxPayloadBytes:   int(getInt64("MAX_PAYLOAD_BYTES", 4*1024*1024)),
 		AppTokenPrefix:    getEnv("APP_TOKEN_PREFIX", "1rc_"),
+
+		RepoDir:            getEnv("REPO_DIR", "./repo"),
+		MaxPackageBytes:    getInt64("MAX_PACKAGE_BYTES", 200*1024*1024),
+		MaxManifestBytes:   int(getInt64("MAX_MANIFEST_BYTES", 64*1024)),
+		MaxDocBytes:        int(getInt64("MAX_DOC_BYTES", 1024*1024)),
+		MaxIconBytes:       int(getInt64("MAX_ICON_BYTES", 256*1024)),
+		MaxScreenshotBytes: int(getInt64("MAX_SCREENSHOT_BYTES", 2*1024*1024)),
+		MaxScreenshots:     int(getInt64("MAX_SCREENSHOTS", 12)),
 	}, nil
 }
 
