@@ -76,6 +76,18 @@ function navigate(to) {
 }
 window.addEventListener('popstate', () => { routeSignal.value = parseLocation(); });
 
+// Public marketplace paths — visible without login. Everything else
+// (cfg-sync /me/*, /admin/*, /show-token/*) requires a valid JWT.
+const PUBLIC_PATHS = ['/', '/apps', '/tags'];
+function isPublicPath(path) {
+  if (path === '/login' || path === '/register') return false;
+  for (const p of PUBLIC_PATHS) {
+    if (path === p) return true;
+    if (path.startsWith(p + '/')) return true;
+  }
+  return false;
+}
+
 // ============================================================
 // jwt decode
 // ============================================================
@@ -244,20 +256,27 @@ function App() {
   const user = userSignal.value;
   const jwt = jwtSignal.value;
 
-  // Auto-redirect: not logged in -> /login, non-admin hitting /admin -> /apps,
-  // logged in but on /login or /register -> redirect to home.
+  // Auto-redirect: not logged in + protected path -> /login,
+  // non-admin hitting /admin -> /apps, expired session -> clear + redirect,
+  // already-logged-in hitting /login or /register -> /apps.
   useEffect(() => {
-    if (!jwt && path !== '/login' && path !== '/register' && path !== '/') {
-      navigate('/login');
-    } else if (jwt && (path === '/' || path === '/login' || path === '/register')) {
-      navigate(user && user.is_admin ? '/admin/apps' : '/apps');
-    } else if (jwt && segments[0] === 'admin' && !(user && user.is_admin)) {
-      showToast('err', '需要管理员权限');
-      navigate('/apps');
-    } else if (jwt && isExpired(user)) {
+    if (jwt && isExpired(user)) {
       showToast('err', '会话已过期，请重新登录');
       clearLocalSession();
+      if (!isPublicPath(path)) navigate('/login');
+      return;
+    }
+    if (jwt && (path === '/login' || path === '/register')) {
+      navigate('/apps');
+      return;
+    }
+    if (!jwt && !isPublicPath(path) && path !== '/login' && path !== '/register') {
       navigate('/login');
+      return;
+    }
+    if (jwt && segments[0] === 'admin' && !(user && user.is_admin)) {
+      showToast('err', '需要管理员权限');
+      navigate('/apps');
     }
   }, [jwt, path, user]);
 
@@ -267,7 +286,9 @@ function App() {
   if (!jwt && (path === '/login' || path === '/register')) {
     return html`<${AuthPage} mode=${path === '/register' ? 'register' : 'login'} />`;
   }
-  if (!jwt) return html`<${Loading} />`;
+  // Unauthenticated + protected path: a useEffect above will redirect to
+  // /login; meanwhile render Loading so we don't flash a 401-shaped page.
+  if (!jwt && !isPublicPath(path)) return html`<${Loading} />`;
 
   return html`
     <${Nav} />
@@ -281,8 +302,19 @@ function App() {
 function isAdminPath(segments) { return segments[0] === 'admin'; }
 
 function renderRoute(path, segments) {
-  if (path === '/apps') return html`<${MyApps} />`;
-  if (segments[0] === 'apps' && segments[1]) return html`<${AppDetail} appId=${segments[1]} />`;
+  // Public marketplace routes (visible without login).
+  if (path === '/') return html`<${CatalogHome} />`;
+  if (path === '/apps') return html`<${CatalogList} />`;
+  if (segments[0] === 'apps' && segments[1] && segments[2] === 'v' && segments[3])
+    return html`<${CatalogReleaseDetail} appId=${segments[1]} version=${decodeURIComponent(segments[3])} />`;
+  if (segments[0] === 'apps' && segments[1])
+    return html`<${CatalogAppDetail} appId=${segments[1]} />`;
+
+  // Authenticated cfg-sync routes. Formerly /apps/* — relocated under
+  // /me/apps/* to free the /apps namespace for the public marketplace.
+  if (path === '/me/apps') return html`<${MyApps} />`;
+  if (segments[0] === 'me' && segments[1] === 'apps' && segments[2])
+    return html`<${AppDetail} appId=${segments[2]} />`;
   if (path === '/me') return html`<${MyQuota} />`;
   if (path === '/me/settings') return html`<${MySettings} />`;
   if (path === '/admin/apps') return html`<${AdminApps} />`;
@@ -308,37 +340,50 @@ function Nav() {
   const menuOpen = menuOpenSignal.value;
   const ref = usePageClickAway(menuOpen, () => { menuOpenSignal.value = false; });
 
-  const isActive = (p) => path === p;
+  const isActive = (p) => path === p || (p !== '/' && path.startsWith(p));
   const initial = (user && user.email) ? user.email[0].toUpperCase() : '?';
 
   return html`
     <nav class="nav" aria-label="primary">
-      <a class="nav-brand" href="/apps"
-         onClick=${(e) => { e.preventDefault(); navigate('/apps'); }}>
+      <a class="nav-brand" href="/"
+         onClick=${(e) => { e.preventDefault(); navigate('/'); }}>
         <span class="nav-brand-mark">cf</span>
         cfgsync
       </a>
       <div class="nav-right">
-        ${isAdmin ? html`<${NavAdminLinks} isActive=${isActive} />` : null}
-        <a class="nav-link ${isActive('/me') ? 'active' : ''}"
-           href="/me"
-           onClick=${(e) => { e.preventDefault(); navigate('/me'); }}>
-          <span>配额</span>
+        <a class="nav-link ${isActive('/apps') ? 'active' : ''}"
+           href="/apps"
+           onClick=${(e) => { e.preventDefault(); navigate('/apps'); }}>
+          <span>应用市场</span>
         </a>
-        <a class="nav-link ${isActive('/me/settings') ? 'active' : ''}"
-           href="/me/settings"
-           onClick=${(e) => { e.preventDefault(); navigate('/me/settings'); }}>
-          <span>设置</span>
-        </a>
-        <span class="nav-divider"></span>
-        <button ref=${ref} class="nav-user-btn"
-                onClick=${(e) => { e.stopPropagation(); menuOpenSignal.value = !menuOpen; }}
-                aria-haspopup="menu" aria-expanded=${menuOpen}>
-          <span class="nav-user-btn-avatar">${initial}</span>
-          <span>${user ? user.email : ''}</span>
-          <span aria-hidden="true">▾</span>
-        </button>
-        ${menuOpen ? html`<${NavUserMenu} onNavigate=${() => navigate('/me/settings')} />` : null}
+        ${user ? html`
+          <a class="nav-link ${isActive('/me/apps') ? 'active' : ''}"
+             href="/me/apps"
+             onClick=${(e) => { e.preventDefault(); navigate('/me/apps'); }}>
+            <span>我的配置</span>
+          </a>
+          <a class="nav-link ${isActive('/me') ? 'active' : ''}"
+             href="/me"
+             onClick=${(e) => { e.preventDefault(); navigate('/me'); }}>
+            <span>配额</span>
+          </a>
+          ${isAdmin ? html`<${NavAdminLinks} isActive=${isActive} />` : null}
+          <span class="nav-divider"></span>
+          <button ref=${ref} class="nav-user-btn"
+                  onClick=${(e) => { e.stopPropagation(); menuOpenSignal.value = !menuOpen; }}
+                  aria-haspopup="menu" aria-expanded=${menuOpen}>
+            <span class="nav-user-btn-avatar">${initial}</span>
+            <span>${user.email}</span>
+            <span aria-hidden="true">▾</span>
+          </button>
+          ${menuOpen ? html`<${NavUserMenu} user=${user} onNavigate=${() => navigate('/me/settings')} />` : null}
+        ` : html`
+          <a class="nav-link ${isActive('/login') ? 'active' : ''}"
+             href="/login"
+             onClick=${(e) => { e.preventDefault(); navigate('/login'); }}>
+            <span>登录</span>
+          </a>
+        `}
       </div>
     </nav>
   `;
@@ -428,8 +473,8 @@ function NotFound() {
         <div class="empty-title">页面不存在</div>
         <div class="empty-desc">你访问的路径没有匹配任何页面。</div>
         <div class="empty-cta">
-          <a class="btn" href="/apps"
-             onClick=${(e) => { e.preventDefault(); navigate('/apps'); }}>返回首页</a>
+          <a class="btn" href="/"
+             onClick=${(e) => { e.preventDefault(); navigate('/'); }}>返回首页</a>
         </div>
       </div>
     </div>
@@ -515,7 +560,7 @@ function MyApps() {
 
   return html`
     <nav class="breadcrumb" aria-label="breadcrumbs">
-      <a href="/apps" onClick=${(e) => { e.preventDefault(); navigate('/apps'); }}>我的应用</a>
+      <a href="/me/apps" onClick=${(e) => { e.preventDefault(); navigate('/me/apps'); }}>我的应用</a>
     </nav>
     <div class="page-header">
       <div class="page-header-content">
@@ -536,7 +581,7 @@ function MyApps() {
         <div class="grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px">
           ${apps.map((a) => html`
             <a key=${a.app_id} class="card" href=${'/apps/' + a.app_id}
-               onClick=${(e) => { e.preventDefault(); navigate('/apps/' + a.app_id); }}
+               onClick=${(e) => { e.preventDefault(); navigate('/me/apps/' + a.app_id); }}
                style="display:block;color:inherit;text-decoration:none">
               <div class="card-title">${a.display_name}</div>
               <div class="card-meta mono">${a.app_id}</div>
@@ -618,7 +663,7 @@ function AppDetail({ appId }) {
 
   return html`
     <nav class="breadcrumb">
-      <a href="/apps" onClick=${(e) => { e.preventDefault(); navigate('/apps'); }}>我的应用</a>
+      <a href="/me/apps" onClick=${(e) => { e.preventDefault(); navigate('/me/apps'); }}>我的应用</a>
       <span class="breadcrumb-sep">/</span>
       <span class="breadcrumb-current">${appId}</span>
     </nav>
@@ -828,7 +873,7 @@ function ShowToken({ appId, token }) {
   return html`
     <div class="main main-narrow">
       <nav class="breadcrumb">
-        <a href="/apps/${appId}" onClick=${(e) => { e.preventDefault(); navigate('/apps/' + appId); }}>${appId}</a>
+        <a href="/me/apps/${appId}" onClick=${(e) => { e.preventDefault(); navigate('/me/apps/' + appId); }}>${appId}</a>
         <span class="breadcrumb-sep">/</span>
         <span class="breadcrumb-current">新 Token</span>
       </nav>
@@ -862,7 +907,7 @@ function ShowToken({ appId, token }) {
 
       <div class="btn-row-right" style="margin-top:16px">
         <a class="btn" href=${'/apps/' + appId}
-           onClick=${(e) => { e.preventDefault(); navigate('/apps/' + appId); }}>我已保存</a>
+           onClick=${(e) => { e.preventDefault(); navigate('/me/apps/' + appId); }}>我已保存</a>
       </div>
     </div>
   `;
@@ -1123,6 +1168,299 @@ function AdminUsers() {
         <button class="btn btn-sm" disabled=${!hasNext} onClick=${() => setOffset(offset + limit)}>下一页</button>
       </div>
     </div>
+  `;
+}
+
+// ============================================================
+// Catalog (public marketplace) — visible without login
+// ============================================================
+
+function CatalogCard({ app }) {
+  return html`
+    <a class="catalog-card" href="/apps/${app.app_id}"
+       onClick=${(e) => { e.preventDefault(); navigate('/apps/' + app.app_id); }}>
+      <div class="catalog-card-icon">
+        ${app.icon_url
+          ? html`<img src=${app.icon_url} alt="" loading="lazy" />`
+          : html`<span class="catalog-card-icon-fallback">${(app.display_name || '?')[0].toUpperCase()}</span>`}
+      </div>
+      <div class="catalog-card-body">
+        <div class="catalog-card-title">${app.display_name}</div>
+        <div class="catalog-card-summary">${app.summary || html`<span class="muted">（无简介）</span>`}</div>
+        <div class="catalog-card-meta">
+          ${app.latest_version ? html`<span class="badge">v${app.latest_version}</span>` : null}
+          ${(app.tags || []).slice(0, 3).map((t) => html`<span class="tag-chip-sm">${t}</span>`)}
+        </div>
+      </div>
+    </a>
+  `;
+}
+
+function Pagination({ page, size, total, onPage }) {
+  const pages = Math.max(1, Math.ceil(total / size));
+  if (pages <= 1) return null;
+  return html`
+    <div class="pagination">
+      <button class="btn btn-sm" disabled=${page <= 1} onClick=${() => onPage(page - 1)}>上一页</button>
+      <span class="pagination-info">${page} / ${pages}（共 ${total}）</span>
+      <button class="btn btn-sm" disabled=${page >= pages} onClick=${() => onPage(page + 1)}>下一页</button>
+    </div>
+  `;
+}
+
+function CatalogHome() {
+  const { data, err, loading } = useApi('GET', '/api/v1/catalog/apps?size=12', []);
+  const { data: tagsData } = useApi('GET', '/api/v1/catalog/tags', []);
+  if (err) return html`<${ErrorBox} err=${err} />`;
+  if (loading) return html`<div class="loading-text">加载中…</div>`;
+  const apps = data?.apps || [];
+  const tags = tagsData?.tags || [];
+  return html`
+    <div class="page-header">
+      <div class="page-header-content">
+        <h1 class="page-title">应用市场</h1>
+        <p class="page-description">浏览、搜索、下载 cfgsync 上发布的应用。</p>
+      </div>
+    </div>
+    ${tags.length > 0 ? html`
+      <div class="card" style="margin-bottom:16px">
+        <h3 style="margin:0 0 8px">热门标签</h3>
+        <div class="tag-cloud">
+          ${tags.slice(0, 20).map((t) => html`
+            <a class="tag-chip" href="/apps?tag=${encodeURIComponent(t.tag)}"
+               onClick=${(e) => { e.preventDefault(); navigate('/apps?tag=' + encodeURIComponent(t.tag)); }}>
+              ${t.tag}<span class="tag-count">${t.count}</span>
+            </a>
+          `)}
+        </div>
+      </div>
+    ` : null}
+    <h2 class="section-title">最新发布</h2>
+    ${apps.length === 0
+      ? html`<div class="empty">
+          <div class="empty-icon">○</div>
+          <div class="empty-title">暂无应用</div>
+          <div class="empty-desc">等开发者上传第一个应用后会出现在这里。</div>
+        </div>`
+      : html`<div class="catalog-grid">
+          ${apps.map((a) => html`<${CatalogCard} key=${a.app_id} app=${a} />`)}
+        </div>`}
+  `;
+}
+
+function CatalogList() {
+  const params = new URLSearchParams(location.search);
+  const initialTag = params.get('tag') || '';
+  const initialQ = params.get('q') || '';
+  const initialPage = parseInt(params.get('page') || '1', 10) || 1;
+  const [tag, setTag] = useState(initialTag);
+  const [q, setQ] = useState(initialQ);
+  const [page, setPage] = useState(initialPage);
+  const [searchInput, setSearchInput] = useState(initialQ);
+
+  let query = `/api/v1/catalog/apps?page=${page}&size=20`;
+  if (tag) query += `&tag=${encodeURIComponent(tag)}`;
+  if (q) query += `&q=${encodeURIComponent(q)}`;
+
+  const { data, err, loading } = useApi('GET', query, [tag, q, page]);
+  const { data: tagsData } = useApi('GET', '/api/v1/catalog/tags', []);
+
+  const submitSearch = (e) => { e.preventDefault(); setQ(searchInput); setPage(1); };
+  const clearFilters = () => { setTag(''); setQ(''); setSearchInput(''); setPage(1); };
+
+  return html`
+    <nav class="breadcrumb">
+      <a href="/" onClick=${(e) => { e.preventDefault(); navigate('/'); }}>应用市场</a>
+      <span class="breadcrumb-sep">/</span>
+      <span class="breadcrumb-current">所有应用</span>
+    </nav>
+    <div class="catalog-layout">
+      <aside class="catalog-sidebar">
+        <div class="card">
+          <h3 style="margin:0 0 8px">标签</h3>
+          <div class="catalog-tags-list">
+            <button class="tag-chip ${tag === '' ? 'active' : ''}"
+                    onClick=${() => { setTag(''); setPage(1); }}>全部</button>
+            ${(tagsData?.tags || []).map((t) => html`
+              <button class="tag-chip ${tag === t.tag ? 'active' : ''}"
+                      onClick=${() => { setTag(t.tag); setPage(1); }}>
+                ${t.tag}<span class="tag-count">${t.count}</span>
+              </button>
+            `)}
+          </div>
+        </div>
+      </aside>
+      <div class="catalog-main">
+        <form class="catalog-search" onSubmit=${submitSearch}>
+          <input type="text" placeholder="搜索应用名称或描述…"
+                 value=${searchInput}
+                 onInput=${(e) => setSearchInput(e.target.value)} />
+          <button class="btn btn-primary" type="submit">搜索</button>
+          ${(tag || q) ? html`<button class="btn" type="button" onClick=${clearFilters}>清除</button>` : null}
+          ${tag ? html`<span class="catalog-filter-hint">按标签 <code>${tag}</code> 过滤</span>` : null}
+        </form>
+        ${err ? html`<${ErrorBox} err=${err} />` :
+          loading ? html`<div class="loading-text">加载中…</div>` :
+          (data?.apps?.length || 0) === 0 ? html`
+            <div class="empty">
+              <div class="empty-icon">○</div>
+              <div class="empty-title">未找到应用</div>
+              <div class="empty-desc">${tag || q ? '换个标签或关键字试试。' : '还没有应用被发布。'}</div>
+            </div>
+          ` : html`
+            <div class="catalog-grid">
+              ${(data.apps || []).map((a) => html`<${CatalogCard} key=${a.app_id} app=${a} />`)}
+            </div>
+            <${Pagination} page=${data.page} size=${data.size} total=${data.total} onPage=${setPage} />
+          `}
+      </div>
+    </div>
+  `;
+}
+
+function CatalogDocSection({ appId, version, name, title, defaultExpanded }) {
+  const [content, setContent] = useState(null);
+  const [expanded, setExpanded] = useState(defaultExpanded !== false);
+  const [err, setErr] = useState(null);
+  useEffect(() => {
+    if (!version || !expanded) return;
+    setContent(null); setErr(null);
+    fetch(`/api/v1/catalog/apps/${appId}/releases/${version}/docs/${name}/rendered`)
+      .then((r) => r.ok ? r.text() : Promise.reject(new Error('加载失败')))
+      .then(setContent)
+      .catch((e) => setErr(e.message));
+  }, [appId, version, name, expanded]);
+  if (!version) return null;
+  return html`
+    <div class="card catalog-doc-card">
+      <div class="catalog-doc-header" onClick=${() => setExpanded(!expanded)}>
+        <h3 style="margin:0">${title}</h3>
+        <span class="catalog-doc-toggle" aria-hidden="true">${expanded ? '−' : '+'}</span>
+      </div>
+      ${expanded ? html`
+        ${err ? html`<div class="notice notice-danger"><span class="notice-icon">!</span>${err}</div>` :
+          content === null ? html`<div class="loading-text">加载中…</div>` :
+          html`<div class="catalog-doc-body markdown" dangerouslySetInnerHTML=${{ __html: content }} />`}
+      ` : null}
+    </div>
+  `;
+}
+
+function CatalogReleasesList({ appId }) {
+  const { data, err, loading } = useApi('GET', `/api/v1/catalog/apps/${appId}/releases`, [appId]);
+  if (err) return html`<${ErrorBox} err=${err} />`;
+  if (loading) return html`<div class="loading-text">加载中…</div>`;
+  const releases = data?.releases || [];
+  if (releases.length === 0) return null;
+  return html`
+    <div class="card">
+      <h3 style="margin:0 0 8px">版本历史</h3>
+      <div class="table-wrap">
+        <table class="table">
+          <thead><tr><th>版本</th><th>大小</th><th>发布时间</th><th></th></tr></thead>
+          <tbody>
+            ${releases.map((r) => html`
+              <tr key=${r.version}>
+                <td><strong>v${r.version}</strong></td>
+                <td>${humanBytes(r.package_size)}</td>
+                <td class="muted">${fmtTime(r.created_at)}</td>
+                <td>
+                  <a class="btn btn-sm" href="/apps/${appId}/v/${r.version}"
+                     onClick=${(e) => { e.preventDefault(); navigate('/apps/' + appId + '/v/' + r.version); }}>详情</a>
+                </td>
+              </tr>
+            `)}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+function CatalogAppDetail({ appId }) {
+  const { data, err, loading } = useApi('GET', `/api/v1/catalog/apps/${appId}`, [appId]);
+  if (err) return html`<${ErrorBox} err=${err} />`;
+  if (loading) return html`<div class="loading-text">加载中…</div>`;
+  const latest = data?.latest_release;
+  const tags = data?.tags || [];
+  return html`
+    <nav class="breadcrumb">
+      <a href="/" onClick=${(e) => { e.preventDefault(); navigate('/'); }}>应用市场</a>
+      <span class="breadcrumb-sep">/</span>
+      <a href="/apps" onClick=${(e) => { e.preventDefault(); navigate('/apps'); }}>所有应用</a>
+      <span class="breadcrumb-sep">/</span>
+      <span class="breadcrumb-current">${data?.display_name || appId}</span>
+    </nav>
+    <div class="catalog-detail-header">
+      ${data?.icon_url
+        ? html`<img class="catalog-detail-icon" src=${data.icon_url} alt="" />`
+        : html`<div class="catalog-detail-icon fallback">${(data?.display_name || '?')[0].toUpperCase()}</div>`}
+      <div class="catalog-detail-meta">
+        <h1>${data?.display_name || appId}</h1>
+        ${data?.summary ? html`<p class="catalog-detail-summary">${data.summary}</p>` : null}
+        ${tags.length > 0 ? html`
+          <div class="catalog-detail-tags">
+            ${tags.map((t) => html`<span class="tag-chip">${t}</span>`)}
+          </div>
+        ` : null}
+        <div class="catalog-detail-info">
+          ${data?.license ? html`<span class="info-row"><strong>License:</strong> ${data.license}</span>` : null}
+          ${data?.homepage ? html`<span class="info-row"><strong>主页:</strong> <a href=${data.homepage} target="_blank" rel="noopener">${data.homepage}</a></span>` : null}
+          ${data?.author?.name ? html`<span class="info-row"><strong>作者:</strong> ${data.author.name}</span>` : null}
+        </div>
+        ${latest ? html`
+          <div class="catalog-detail-download">
+            <span class="muted">最新版本 <strong>v${latest.version}</strong> · ${fmtTime(latest.created_at)}</span>
+            <a class="btn btn-primary" href=${latest.download_url}>下载包</a>
+            <a class="btn" href="/apps/${appId}/v/${latest.version}"
+               onClick=${(e) => { e.preventDefault(); navigate('/apps/' + appId + '/v/' + latest.version); }}>版本详情</a>
+          </div>
+        ` : html`<div class="notice">暂无可下载的版本</div>`}
+      </div>
+    </div>
+    ${latest ? html`<${CatalogDocSection} appId=${appId} version=${latest.version} name="README.md" title="应用介绍" defaultExpanded=${true} />` : null}
+    ${latest ? html`<${CatalogDocSection} appId=${appId} version=${latest.version} name="INSTALL.md" title="安装说明" />` : null}
+    ${latest ? html`<${CatalogDocSection} appId=${appId} version=${latest.version} name="USAGE.md" title="使用说明" />` : null}
+    <${CatalogReleasesList} appId=${appId} />
+  `;
+}
+
+function CatalogReleaseDetail({ appId, version }) {
+  const { data, err, loading } = useApi('GET', `/api/v1/catalog/apps/${appId}/releases/${version}`, [appId, version]);
+  if (err) return html`<${ErrorBox} err=${err} />`;
+  if (loading) return html`<div class="loading-text">加载中…</div>`;
+  const platforms = data?.platforms || [];
+  return html`
+    <nav class="breadcrumb">
+      <a href="/" onClick=${(e) => { e.preventDefault(); navigate('/'); }}>应用市场</a>
+      <span class="breadcrumb-sep">/</span>
+      <a href="/apps/${appId}" onClick=${(e) => { e.preventDefault(); navigate('/apps/' + appId); }}>${appId}</a>
+      <span class="breadcrumb-sep">/</span>
+      <span class="breadcrumb-current">v${version}</span>
+    </nav>
+    <div class="page-header">
+      <div class="page-header-content">
+        <h1 class="page-title">${appId} <span class="muted">— v${version}</span></h1>
+        <p class="page-description">发布于 ${fmtTime(data?.created_at)} · ${humanBytes(data?.package_size || 0)}</p>
+      </div>
+    </div>
+    <div class="card">
+      <h3 style="margin:0 0 12px">下载</h3>
+      <div class="catalog-download-options">
+        <a class="btn btn-primary" href=${data?.download_url}>完整包 (.tar.gz)</a>
+        ${platforms.length > 0 ? html`<span class="catalog-download-or">或选择平台：</span>` : null}
+        ${platforms.map((p) => html`
+          <a class="btn" key=${p} href="${data?.download_url}?platform=${p}">${p}</a>
+        `)}
+      </div>
+      ${data?.package_sha256 ? html`
+        <div class="catalog-sha">
+          <strong>SHA256:</strong> <code>${data.package_sha256}</code>
+        </div>
+      ` : null}
+    </div>
+    <${CatalogDocSection} appId=${appId} version=${version} name="CHANGELOG.md" title="版本说明" defaultExpanded=${true} />
+    <${CatalogDocSection} appId=${appId} version=${version} name="INSTALL.md" title="安装说明" />
   `;
 }
 
