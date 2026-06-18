@@ -66,6 +66,7 @@ func New(cfg *config.Config, db *sql.DB, repo *repo.Repo) http.Handler {
 	mux.Handle("GET /api/v1/catalog/apps/{app_id}/releases", handler.ListCatalogReleases(db))
 	mux.Handle("GET /api/v1/catalog/apps/{app_id}/releases/{version}", handler.GetCatalogRelease(db))
 	mux.Handle("GET /api/v1/catalog/apps/{app_id}/releases/{version}/docs/{name}", handler.GetCatalogDoc(db))
+mux.Handle("GET /api/v1/catalog/apps/{app_id}/releases/{version}/docs/{name}/rendered", handler.GetCatalogDocRendered(db))
 	mux.Handle("GET /api/v1/catalog/apps/{app_id}/releases/{version}/assets/{name...}", handler.GetCatalogAsset(db, repo))
 	mux.Handle("GET /api/v1/catalog/apps/{app_id}/releases/{version}/download", handler.DownloadCatalogRelease(db, repo))
 	mux.Handle("GET /api/v1/catalog/tags", handler.ListCatalogTags(db))

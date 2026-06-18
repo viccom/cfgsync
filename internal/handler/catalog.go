@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -22,6 +23,33 @@ const (
 	defaultCatalogPageSize = 20
 	maxCatalogPageSize     = 100
 )
+
+// ErrDocNotFound is returned by fetchDocContent when the release exists
+// but the named document is not in its docs_json cache.
+var ErrDocNotFound = errors.New("doc not found")
+
+// fetchDocContent reads one markdown document from the release's docs_json
+// cache. Returns sql.ErrNoRows if the release row is missing, ErrDocNotFound
+// if the release exists but the named document isn't present.
+func fetchDocContent(db *sql.DB, ctx context.Context, appID, version, name string) (string, error) {
+	var docsJSON string
+	err := db.QueryRowContext(ctx,
+		`SELECT docs_json FROM app_releases WHERE app_id = ? AND version = ?`,
+		appID, version,
+	).Scan(&docsJSON)
+	if err != nil {
+		return "", err
+	}
+	var docs map[string]string
+	if err := json.Unmarshal([]byte(docsJSON), &docs); err != nil {
+		return "", err
+	}
+	content, ok := docs[name]
+	if !ok {
+		return "", ErrDocNotFound
+	}
+	return content, nil
+}
 
 // releaseBase returns the canonical URL prefix for one (app_id, version).
 // Catalog responses embed URLs so the SPA doesn't need URL conventions.
@@ -409,7 +437,7 @@ func GetCatalogRelease(db *sql.DB) http.HandlerFunc {
 }
 
 // GetCatalogDoc handles GET /api/v1/catalog/apps/{app_id}/releases/{version}/docs/{name}.
-// Returns the markdown body as text/plain. name ∈ {README, INSTALL, USAGE,
+// Returns the markdown body as text/markdown. name ∈ {README, INSTALL, USAGE,
 // CHANGELOG}.md.
 func GetCatalogDoc(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -419,34 +447,50 @@ func GetCatalogDoc(db *sql.DB) http.HandlerFunc {
 		if !assertReleaseVisible(w, db, appID, version) {
 			return
 		}
-		// Load docs_json from DB; the file content lives there so the
-		// catalog API doesn't need FS access for every doc read.
-		var docsJSON string
-		err := db.QueryRowContext(r.Context(),
-			`SELECT docs_json FROM app_releases WHERE app_id = ? AND version = ?`,
-			appID, version,
-		).Scan(&docsJSON)
-		if errors.Is(err, sql.ErrNoRows) {
+		content, err := fetchDocContent(db, r.Context(), appID, version, name)
+		switch {
+		case errors.Is(err, sql.ErrNoRows), errors.Is(err, ErrDocNotFound):
 			writeError(w, http.StatusNotFound, "not_found")
 			return
-		}
-		if err != nil {
-			writeInternal(w, "catalog_doc_lookup", err)
-			return
-		}
-		var docs map[string]string
-		if err := json.Unmarshal([]byte(docsJSON), &docs); err != nil {
-			writeInternal(w, "catalog_doc_decode", err)
-			return
-		}
-		content, ok := docs[name]
-		if !ok {
-			writeError(w, http.StatusNotFound, "not_found")
+		case err != nil:
+			writeInternal(w, "catalog_doc_fetch", err)
 			return
 		}
 		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
 		w.Header().Set("Cache-Control", "private, max-age=60")
 		_, _ = io.WriteString(w, content)
+	}
+}
+
+// GetCatalogDocRendered handles GET /api/v1/catalog/apps/{app_id}/releases/{version}/docs/{name}/rendered.
+// Renders the markdown to safe HTML (goldmark). Output is text/html; the
+// SPA can innerHTML it without further sanitization because goldmark
+// escapes raw HTML by default.
+func GetCatalogDocRendered(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		appID := r.PathValue("app_id")
+		version := r.PathValue("version")
+		name := r.PathValue("name")
+		if !assertReleaseVisible(w, db, appID, version) {
+			return
+		}
+		content, err := fetchDocContent(db, r.Context(), appID, version, name)
+		switch {
+		case errors.Is(err, sql.ErrNoRows), errors.Is(err, ErrDocNotFound):
+			writeError(w, http.StatusNotFound, "not_found")
+			return
+		case err != nil:
+			writeInternal(w, "catalog_doc_rendered_fetch", err)
+			return
+		}
+		html, err := renderMarkdown(content)
+		if err != nil {
+			writeInternal(w, "catalog_doc_rendered_render", err)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "private, max-age=60")
+		_, _ = io.WriteString(w, html)
 	}
 }
 

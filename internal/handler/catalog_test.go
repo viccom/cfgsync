@@ -313,6 +313,81 @@ func TestGetCatalogDoc_NotFound(t *testing.T) {
 	}
 }
 
+// --- GetCatalogDocRendered ---
+
+func TestGetCatalogDocRendered_Success(t *testing.T) {
+	env := newTestEnv(t)
+	admin := env.seedUser(t, "admin@example.com", "p12345678", true)
+	seedRelease(t, env, admin, "com.foo", map[string]string{
+		"manifest.yaml": validManifestYAML,
+		"README.md":     "# Hello World\n\n[link](https://example.com)\n",
+	})
+
+	req := httptest.NewRequest("GET", "/api/v1/catalog/apps/com.foo/releases/1.0.0/docs/README.md/rendered", &bytes.Buffer{})
+	req.SetPathValue("app_id", "com.foo")
+	req.SetPathValue("version", "1.0.0")
+	req.SetPathValue("name", "README.md")
+	rec := httptest.NewRecorder()
+	GetCatalogDocRendered(env.db).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/html") {
+		t.Errorf("Content-Type=%q, want text/html", ct)
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, "<h1") {
+		t.Errorf("expected <h1, got %s", body)
+	}
+	if !strings.Contains(body, `target="_blank"`) {
+		t.Errorf("expected link target=_blank: %s", body)
+	}
+}
+
+func TestGetCatalogDocRendered_RawScriptEscaped(t *testing.T) {
+	env := newTestEnv(t)
+	admin := env.seedUser(t, "admin@example.com", "p12345678", true)
+	seedRelease(t, env, admin, "com.foo", map[string]string{
+		"manifest.yaml": validManifestYAML,
+		"README.md":     `<script>alert("xss")</script>`,
+	})
+
+	req := httptest.NewRequest("GET", "/api/v1/catalog/apps/com.foo/releases/1.0.0/docs/README.md/rendered", &bytes.Buffer{})
+	req.SetPathValue("app_id", "com.foo")
+	req.SetPathValue("version", "1.0.0")
+	req.SetPathValue("name", "README.md")
+	rec := httptest.NewRecorder()
+	GetCatalogDocRendered(env.db).ServeHTTP(rec, req)
+
+	body := rec.Body.String()
+	if strings.Contains(body, "<script>") {
+		t.Errorf("raw <script> survived in rendered HTML: %s", body)
+	}
+	if !strings.Contains(body, "<!-- raw HTML omitted -->") {
+		t.Errorf("expected raw HTML omitted marker, got %s", body)
+	}
+}
+
+func TestGetCatalogDocRendered_NotFound(t *testing.T) {
+	env := newTestEnv(t)
+	admin := env.seedUser(t, "admin@example.com", "p12345678", true)
+	seedRelease(t, env, admin, "com.foo", map[string]string{
+		"manifest.yaml": validManifestYAML,
+		"README.md":     "x",
+	})
+
+	req := httptest.NewRequest("GET", "/api/v1/catalog/apps/com.foo/releases/1.0.0/docs/USAGE.md/rendered", &bytes.Buffer{})
+	req.SetPathValue("app_id", "com.foo")
+	req.SetPathValue("version", "1.0.0")
+	req.SetPathValue("name", "USAGE.md")
+	rec := httptest.NewRecorder()
+	GetCatalogDocRendered(env.db).ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for absent doc, got %d", rec.Code)
+	}
+}
+
 // --- GetCatalogAsset ---
 
 func TestGetCatalogAsset_IconAndScreenshot(t *testing.T) {
