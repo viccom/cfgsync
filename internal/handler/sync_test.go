@@ -19,8 +19,8 @@ func (e *testEnv) seedAppTokenFor(t *testing.T, uid, appID, label string) string
 	t.Helper()
 	now := nowUnix()
 	if _, err := e.db.Exec(
-		`INSERT INTO apps (app_id, display_name, description, created_at, created_by) VALUES (?, 'X', '', ?, ?)`,
-		appID, now, uid,
+		`INSERT INTO apps (app_id, display_name, description, created_at, created_by, updated_at) VALUES (?, 'X', '', ?, ?, ?)`,
+		appID, now, uid, now,
 	); err != nil {
 		t.Fatalf("seed app: %v", err)
 	}

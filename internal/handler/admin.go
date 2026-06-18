@@ -52,8 +52,8 @@ func AdminCreateApp(db *sql.DB) http.HandlerFunc {
 
 		now := time.Now().Unix()
 		_, err := db.ExecContext(r.Context(),
-			`INSERT INTO apps (app_id, display_name, description, created_at, created_by) VALUES (?, ?, ?, ?, ?)`,
-			req.AppID, req.DisplayName, req.Description, now, adminUID)
+			`INSERT INTO apps (app_id, display_name, description, created_at, created_by, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
+			req.AppID, req.DisplayName, req.Description, now, adminUID, now)
 		if err != nil {
 			if isUniqueViolation(err) {
 				writeError(w, http.StatusConflict, "app_id_exists")

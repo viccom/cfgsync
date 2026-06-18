@@ -159,8 +159,8 @@ func TestAppTokenMW_RejectsTokenForDifferentAppID(t *testing.T) {
 	now := time.Now().Unix()
 
 	if _, err := d.Exec(
-		`INSERT INTO apps (app_id, display_name, description, created_at, created_by) VALUES (?, 'Foo', '', ?, ?)`,
-		"com.foo", now, uid,
+		`INSERT INTO apps (app_id, display_name, description, created_at, created_by, updated_at) VALUES (?, 'Foo', '', ?, ?, ?)`,
+		"com.foo", now, uid, now,
 	); err != nil {
 		t.Fatalf("seed app: %v", err)
 	}
@@ -191,8 +191,8 @@ func TestAppTokenMW_AcceptsValidTokenForMatchingAppID(t *testing.T) {
 	uid := seedUserAuth(t, d, "u@example.com", false)
 	now := time.Now().Unix()
 	if _, err := d.Exec(
-		`INSERT INTO apps (app_id, display_name, description, created_at, created_by) VALUES (?, 'Foo', '', ?, ?)`,
-		"com.foo", now, uid,
+		`INSERT INTO apps (app_id, display_name, description, created_at, created_by, updated_at) VALUES (?, 'Foo', '', ?, ?, ?)`,
+		"com.foo", now, uid, now,
 	); err != nil {
 		t.Fatalf("seed app: %v", err)
 	}

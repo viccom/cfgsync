@@ -83,8 +83,8 @@ func (e *testEnv) seedApp(t *testing.T, appID, displayName, createdBy string) {
 	t.Helper()
 	now := time.Now().Unix()
 	if _, err := e.db.Exec(
-		`INSERT INTO apps (app_id, display_name, description, created_at, created_by) VALUES (?, ?, '', ?, ?)`,
-		appID, displayName, now, createdBy,
+		`INSERT INTO apps (app_id, display_name, description, created_at, created_by, updated_at) VALUES (?, ?, '', ?, ?, ?)`,
+		appID, displayName, now, createdBy, now,
 	); err != nil {
 		t.Fatalf("seed app: %v", err)
 	}
