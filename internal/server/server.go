@@ -59,6 +59,17 @@ func New(cfg *config.Config, db *sql.DB, repo *repo.Repo) http.Handler {
 	mux.Handle("GET /api/v1/apps/{app_id}/config", auth.AppTokenMW(db, handler.GetConfig(db)))
 	mux.Handle("PUT /api/v1/apps/{app_id}/config", auth.AppTokenMW(db, handler.PutConfig(db, cfg)))
 
+	// Catalog (public, no middleware) — read-only app marketplace.
+	// visibility=private apps never appear; unlisted apps only via direct URL.
+	mux.Handle("GET /api/v1/catalog/apps", handler.ListCatalogApps(db))
+	mux.Handle("GET /api/v1/catalog/apps/{app_id}", handler.GetCatalogApp(db))
+	mux.Handle("GET /api/v1/catalog/apps/{app_id}/releases", handler.ListCatalogReleases(db))
+	mux.Handle("GET /api/v1/catalog/apps/{app_id}/releases/{version}", handler.GetCatalogRelease(db))
+	mux.Handle("GET /api/v1/catalog/apps/{app_id}/releases/{version}/docs/{name}", handler.GetCatalogDoc(db))
+	mux.Handle("GET /api/v1/catalog/apps/{app_id}/releases/{version}/assets/{name...}", handler.GetCatalogAsset(db, repo))
+	mux.Handle("GET /api/v1/catalog/apps/{app_id}/releases/{version}/download", handler.DownloadCatalogRelease(db, repo))
+	mux.Handle("GET /api/v1/catalog/tags", handler.ListCatalogTags(db))
+
 	// Catch-all: serve the embedded SPA. /api/v1/* is matched by the more specific
 	// routes above (Go 1.22's method-aware mux takes the explicit handler first).
 	mux.Handle("/", webui.Handler())

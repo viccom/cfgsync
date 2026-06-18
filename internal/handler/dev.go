@@ -253,10 +253,10 @@ func processUpload(db *sql.DB, cfg *config.Config, repository *repo.Repo, allowO
 		// description: keep existing unless manifest supplies a non-empty value.
 		if _, err := tx.ExecContext(r.Context(),
 			`UPDATE apps SET
-				summary = ?, description = COALESCE(NULLIF(?, ''), description),
+				display_name = ?, summary = ?, description = COALESCE(NULLIF(?, ''), description),
 				icon_path = ?, latest_version = ?, visibility = ?, updated_at = ?
 			  WHERE app_id = ?`,
-			summary, mf.Description, iconPath, mf.Version, visibility, now, appID,
+			mf.DisplayName, summary, mf.Description, iconPath, mf.Version, visibility, now, appID,
 		); err != nil {
 			repository.Discard(stage.StagingDir)
 			writeInternal(w, "update_apps", err)

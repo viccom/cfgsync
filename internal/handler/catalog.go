@@ -1,0 +1,613 @@
+package handler
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"io"
+	"log"
+	"mime"
+	"net/http"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+
+	"github.com/viccom/cfgsync/internal/manifest"
+	"github.com/viccom/cfgsync/internal/repo"
+)
+
+const (
+	defaultCatalogPageSize = 20
+	maxCatalogPageSize     = 100
+)
+
+// releaseBase returns the canonical URL prefix for one (app_id, version).
+// Catalog responses embed URLs so the SPA doesn't need URL conventions.
+func releaseBase(appID, version string) string {
+	return "/api/v1/catalog/apps/" + appID + "/releases/" + version
+}
+
+// appBase returns the canonical URL prefix for one app_id.
+func appBase(appID string) string {
+	return "/api/v1/catalog/apps/" + appID
+}
+
+// assertAppVisible writes 404 and returns false if the app does not exist
+// or is private. "public" and "unlisted" both pass — unlisted differs only
+// by being omitted from list responses.
+func assertAppVisible(w http.ResponseWriter, db *sql.DB, appID string) bool {
+	var vis string
+	err := db.QueryRow(`SELECT visibility FROM apps WHERE app_id = ?`, appID).Scan(&vis)
+	switch {
+	case errors.Is(err, sql.ErrNoRows) || vis == "private":
+		writeError(w, http.StatusNotFound, "not_found")
+		return false
+	case err != nil:
+		writeInternal(w, "catalog_app_visibility", err)
+		return false
+	}
+	return true
+}
+
+// assertReleaseVisible combines assertAppVisible + release existence.
+func assertReleaseVisible(w http.ResponseWriter, db *sql.DB, appID, version string) bool {
+	if !assertAppVisible(w, db, appID) {
+		return false
+	}
+	var x int
+	err := db.QueryRow(
+		`SELECT 1 FROM app_releases WHERE app_id = ? AND version = ?`,
+		appID, version,
+	).Scan(&x)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "not_found")
+		return false
+	}
+	if err != nil {
+		writeInternal(w, "catalog_release_lookup", err)
+		return false
+	}
+	return true
+}
+
+func fetchAppTags(db *sql.DB, appID string) ([]string, error) {
+	rows, err := db.Query(`SELECT tag FROM app_tags WHERE app_id = ? ORDER BY tag`, appID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// --- handlers ---
+
+// ListCatalogApps handles GET /api/v1/catalog/apps.
+// Returns every app with visibility='public' and at least one release.
+// Query params: ?tag=, ?q=, ?page=, ?size=.
+func ListCatalogApps(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		if page < 1 {
+			page = 1
+		}
+		size, _ := strconv.Atoi(r.URL.Query().Get("size"))
+		if size <= 0 || size > maxCatalogPageSize {
+			size = defaultCatalogPageSize
+		}
+		offset := (page - 1) * size
+
+		tag := strings.TrimSpace(r.URL.Query().Get("tag"))
+		q := strings.TrimSpace(r.URL.Query().Get("q"))
+
+		where := "WHERE visibility = 'public' AND latest_version != ''"
+		args := []interface{}{}
+		if tag != "" {
+			where += ` AND app_id IN (SELECT app_id FROM app_tags WHERE tag = ?)`
+			args = append(args, tag)
+		}
+		if q != "" {
+			where += ` AND (display_name LIKE ? OR summary LIKE ? OR description LIKE ?)`
+			pattern := "%" + q + "%"
+			args = append(args, pattern, pattern, pattern)
+		}
+
+		var total int
+		if err := db.QueryRowContext(r.Context(),
+			"SELECT COUNT(*) FROM apps "+where, args...,
+		).Scan(&total); err != nil {
+			writeInternal(w, "catalog_list_count", err)
+			return
+		}
+
+		queryArgs := append(args, size, offset)
+		rows, err := db.QueryContext(r.Context(),
+			`SELECT app_id, display_name, summary, icon_path, latest_version, updated_at, created_at
+			   FROM apps `+where+`
+			  ORDER BY updated_at DESC
+			  LIMIT ? OFFSET ?`,
+			queryArgs...,
+		)
+		if err != nil {
+			writeInternal(w, "catalog_list_query", err)
+			return
+		}
+		type appRow struct {
+			AppID, DisplayName, Summary, IconPath, LatestVersion string
+			UpdatedAt, CreatedAt                                  int64
+		}
+		appRows := make([]appRow, 0, size)
+		for rows.Next() {
+			var a appRow
+			if err := rows.Scan(&a.AppID, &a.DisplayName, &a.Summary, &a.IconPath,
+				&a.LatestVersion, &a.UpdatedAt, &a.CreatedAt); err != nil {
+				rows.Close()
+				writeInternal(w, "catalog_list_scan", err)
+				return
+			}
+			appRows = append(appRows, a)
+		}
+		rowsErr := rows.Err()
+		rows.Close()
+		if rowsErr != nil {
+			writeInternal(w, "catalog_list_rows", rowsErr)
+			return
+		}
+
+		// Tags lookup runs after the rows cursor is closed so the single
+		// pooled connection is free for the per-app tag query (db is
+		// configured with SetMaxOpenConns(1) — running the tag SELECT
+		// inside the rows loop would deadlock).
+		type listItem struct {
+			AppID         string   `json:"app_id"`
+			DisplayName   string   `json:"display_name"`
+			Summary       string   `json:"summary,omitempty"`
+			IconURL       string   `json:"icon_url,omitempty"`
+			LatestVersion string   `json:"latest_version"`
+			Tags          []string `json:"tags,omitempty"`
+			UpdatedAt     int64    `json:"updated_at"`
+			CreatedAt     int64    `json:"created_at"`
+		}
+		items := make([]listItem, 0, len(appRows))
+		for _, a := range appRows {
+			tags, _ := fetchAppTags(db, a.AppID)
+			it := listItem{
+				AppID:         a.AppID,
+				DisplayName:   a.DisplayName,
+				Summary:       a.Summary,
+				LatestVersion: a.LatestVersion,
+				Tags:          tags,
+				UpdatedAt:     a.UpdatedAt,
+				CreatedAt:     a.CreatedAt,
+			}
+			if a.IconPath != "" && a.LatestVersion != "" {
+				it.IconURL = releaseBase(a.AppID, a.LatestVersion) + "/assets/" + a.IconPath
+			}
+			items = append(items, it)
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"apps":  items,
+			"page":  page,
+			"size":  size,
+			"total": total,
+		})
+	}
+}
+
+// GetCatalogApp handles GET /api/v1/catalog/apps/{app_id}.
+// 404 for unknown or private; 200 for public or unlisted.
+func GetCatalogApp(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		appID := r.PathValue("app_id")
+		if !assertAppVisible(w, db, appID) {
+			return
+		}
+
+		var (
+			displayName, description, summary string
+			iconPath, latestVersion           string
+			updatedAt, createdAt              int64
+		)
+		err := db.QueryRowContext(r.Context(),
+			`SELECT display_name, description, summary, icon_path, latest_version, updated_at, created_at
+			   FROM apps WHERE app_id = ?`, appID,
+		).Scan(&displayName, &description, &summary, &iconPath, &latestVersion, &updatedAt, &createdAt)
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "not_found")
+			return
+		}
+		if err != nil {
+			writeInternal(w, "catalog_app_fetch", err)
+			return
+		}
+
+		// Tags.
+		tags, _ := fetchAppTags(db, appID)
+
+		// Latest release metadata (homepage/license/author/etc. come from
+		// the manifest cache — apps table doesn't duplicate those fields).
+		var (
+			manifestJSON     string
+			packageSize      int64
+			releaseCreatedAt int64
+		)
+		if latestVersion != "" {
+			_ = db.QueryRowContext(r.Context(),
+				`SELECT manifest_json, package_size, created_at
+				   FROM app_releases WHERE app_id = ? AND version = ?`,
+				appID, latestVersion,
+			).Scan(&manifestJSON, &packageSize, &releaseCreatedAt)
+		}
+		var mf manifest.Manifest
+		_ = json.Unmarshal([]byte(manifestJSON), &mf)
+
+		// Build URLs only when a release exists.
+		var iconURL, downloadURL, releaseNotesURL string
+		var platforms []string
+		if latestVersion != "" {
+			base := releaseBase(appID, latestVersion)
+			if iconPath != "" {
+				iconURL = base + "/assets/" + iconPath
+			}
+			downloadURL = base + "/download"
+			releaseNotesURL = base + "/docs/CHANGELOG.md"
+			for k := range mf.Platforms {
+				platforms = append(platforms, k)
+			}
+			sort.Strings(platforms)
+		}
+
+		var author map[string]string
+		if mf.Author != nil {
+			author = map[string]string{
+				"name":  mf.Author.Name,
+				"email": mf.Author.Email,
+				"url":   mf.Author.URL,
+			}
+		}
+
+		resp := map[string]interface{}{
+			"app_id":         appID,
+			"display_name":   displayName,
+			"description":    description,
+			"summary":        summary,
+			"icon_url":       iconURL,
+			"homepage":       mf.Homepage,
+			"license":        mf.License,
+			"author":         author,
+			"tags":           tags,
+			"keywords":       mf.Keywords,
+			"requires_os":    mf.RequiresOS,
+			"releases_url":   appBase(appID) + "/releases",
+			"updated_at":     updatedAt,
+			"created_at":     createdAt,
+		}
+		if latestVersion != "" {
+			resp["latest_release"] = map[string]interface{}{
+				"version":          latestVersion,
+				"created_at":       releaseCreatedAt,
+				"package_size":     packageSize,
+				"platforms":        platforms,
+				"download_url":     downloadURL,
+				"release_notes_url": releaseNotesURL,
+			}
+		}
+		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
+// ListCatalogReleases handles GET /api/v1/catalog/apps/{app_id}/releases.
+func ListCatalogReleases(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		appID := r.PathValue("app_id")
+		if !assertAppVisible(w, db, appID) {
+			return
+		}
+		rows, err := db.QueryContext(r.Context(),
+			`SELECT version, package_size, created_at
+			   FROM app_releases
+			  WHERE app_id = ?
+			  ORDER BY version_major DESC, version_minor DESC,
+			           version_patch DESC, version_pre ASC`,
+			appID,
+		)
+		if err != nil {
+			writeInternal(w, "catalog_releases_query", err)
+			return
+		}
+		defer rows.Close()
+		type rel struct {
+			Version     string `json:"version"`
+			PackageSize int64  `json:"package_size"`
+			CreatedAt   int64  `json:"created_at"`
+			DownloadURL string `json:"download_url,omitempty"`
+			DetailURL   string `json:"detail_url,omitempty"`
+		}
+		out := make([]rel, 0)
+		for rows.Next() {
+			var it rel
+			if err := rows.Scan(&it.Version, &it.PackageSize, &it.CreatedAt); err != nil {
+				writeInternal(w, "catalog_releases_scan", err)
+				return
+			}
+			base := releaseBase(appID, it.Version)
+			it.DownloadURL = base + "/download"
+			it.DetailURL = base
+			out = append(out, it)
+		}
+		if err := rows.Err(); err != nil {
+			writeInternal(w, "catalog_releases_rows", err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"app_id":   appID,
+			"releases": out,
+		})
+	}
+}
+
+// GetCatalogRelease handles GET /api/v1/catalog/apps/{app_id}/releases/{version}.
+func GetCatalogRelease(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		appID := r.PathValue("app_id")
+		version := r.PathValue("version")
+		if !assertReleaseVisible(w, db, appID, version) {
+			return
+		}
+		var (
+			manifestJSON string
+			packageSize  int64
+			pkgSHA       string
+			releaseNotes string
+			createdAt    int64
+		)
+		err := db.QueryRowContext(r.Context(),
+			`SELECT manifest_json, package_size, package_sha256,
+			        COALESCE(release_notes, ''), created_at
+			   FROM app_releases WHERE app_id = ? AND version = ?`,
+			appID, version,
+		).Scan(&manifestJSON, &packageSize, &pkgSHA, &releaseNotes, &createdAt)
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "not_found")
+			return
+		}
+		if err != nil {
+			writeInternal(w, "catalog_release_fetch", err)
+			return
+		}
+		var mf manifest.Manifest
+		_ = json.Unmarshal([]byte(manifestJSON), &mf)
+		var platforms []string
+		for k := range mf.Platforms {
+			platforms = append(platforms, k)
+		}
+		sort.Strings(platforms)
+		base := releaseBase(appID, version)
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"app_id":          appID,
+			"version":         version,
+			"package_size":    packageSize,
+			"package_sha256":  pkgSHA,
+			"manifest":        mf,
+			"platforms":       platforms,
+			"release_notes":   releaseNotes,
+			"created_at":      createdAt,
+			"download_url":    base + "/download",
+			"docs_url":        base + "/docs/README.md",
+			"assets_base_url": base + "/assets/",
+		})
+	}
+}
+
+// GetCatalogDoc handles GET /api/v1/catalog/apps/{app_id}/releases/{version}/docs/{name}.
+// Returns the markdown body as text/plain. name ∈ {README, INSTALL, USAGE,
+// CHANGELOG}.md.
+func GetCatalogDoc(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		appID := r.PathValue("app_id")
+		version := r.PathValue("version")
+		name := r.PathValue("name")
+		if !assertReleaseVisible(w, db, appID, version) {
+			return
+		}
+		// Load docs_json from DB; the file content lives there so the
+		// catalog API doesn't need FS access for every doc read.
+		var docsJSON string
+		err := db.QueryRowContext(r.Context(),
+			`SELECT docs_json FROM app_releases WHERE app_id = ? AND version = ?`,
+			appID, version,
+		).Scan(&docsJSON)
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "not_found")
+			return
+		}
+		if err != nil {
+			writeInternal(w, "catalog_doc_lookup", err)
+			return
+		}
+		var docs map[string]string
+		if err := json.Unmarshal([]byte(docsJSON), &docs); err != nil {
+			writeInternal(w, "catalog_doc_decode", err)
+			return
+		}
+		content, ok := docs[name]
+		if !ok {
+			writeError(w, http.StatusNotFound, "not_found")
+			return
+		}
+		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
+		w.Header().Set("Cache-Control", "private, max-age=60")
+		_, _ = io.WriteString(w, content)
+	}
+}
+
+// GetCatalogAsset handles GET /api/v1/catalog/apps/{app_id}/releases/{version}/assets/{name...}.
+// Streams icon.png, screenshots/*, etc. with a long cache header because
+// content is immutable per (app_id, version).
+func GetCatalogAsset(db *sql.DB, repository *repo.Repo) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		appID := r.PathValue("app_id")
+		version := r.PathValue("version")
+		name := r.PathValue("name")
+		if name == "" {
+			writeError(w, http.StatusNotFound, "not_found")
+			return
+		}
+		if !assertReleaseVisible(w, db, appID, version) {
+			return
+		}
+		f, size, err := repository.OpenFile(appID, version, name)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "not_found")
+			return
+		}
+		defer f.Close()
+		ct := mime.TypeByExtension(filepath.Ext(name))
+		if ct == "" {
+			ct = "application/octet-stream"
+		}
+		w.Header().Set("Content-Type", ct)
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		_, _ = io.Copy(w, f)
+	}
+}
+
+// DownloadCatalogRelease handles GET /api/v1/catalog/apps/{app_id}/releases/{version}/download.
+// Without ?platform=, streams the full package.tar.gz. With ?platform=X,
+// streams the binary at manifest.platforms.X.path.
+func DownloadCatalogRelease(db *sql.DB, repository *repo.Repo) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		appID := r.PathValue("app_id")
+		version := r.PathValue("version")
+		platform := strings.TrimSpace(r.URL.Query().Get("platform"))
+		if !assertReleaseVisible(w, db, appID, version) {
+			return
+		}
+
+		if platform == "" {
+			// Stream the full package.tar.gz.
+			pi, err := repository.PackageInfo(appID, version)
+			if err != nil {
+				if os.IsNotExist(err) {
+					writeError(w, http.StatusNotFound, "not_found")
+					return
+				}
+				writeInternal(w, "catalog_download_pkginfo", err)
+				return
+			}
+			f, err := os.Open(pi.Path)
+			if err != nil {
+				writeError(w, http.StatusNotFound, "not_found")
+				return
+			}
+			defer f.Close()
+			filename := appID + "-" + version + ".tar.gz"
+			w.Header().Set("Content-Type", "application/gzip")
+			w.Header().Set("Content-Length", strconv.FormatInt(pi.Size, 10))
+			w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+			w.Header().Set("X-Content-SHA256", pi.SHA256)
+			_, _ = io.Copy(w, f)
+			return
+		}
+
+		// Platform-specific binary.
+		var manifestJSON string
+		err := db.QueryRowContext(r.Context(),
+			`SELECT manifest_json FROM app_releases WHERE app_id = ? AND version = ?`,
+			appID, version,
+		).Scan(&manifestJSON)
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "not_found")
+			return
+		}
+		if err != nil {
+			writeInternal(w, "catalog_download_manifest", err)
+			return
+		}
+		var mf manifest.Manifest
+		_ = json.Unmarshal([]byte(manifestJSON), &mf)
+		p, ok := mf.Platforms[platform]
+		if !ok {
+			log.Printf("catalog.download: platform %q not in manifest platforms=%+v", platform, mf.Platforms)
+			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+				"error":     "invalid_platform",
+				"available": platformKeys(mf.Platforms),
+				"requested": platform,
+			})
+			return
+		}
+		f, size, err := repository.OpenFile(appID, version, p.Path)
+		if err != nil {
+			log.Printf("catalog.download: OpenFile %q failed: %v", p.Path, err)
+			writeError(w, http.StatusNotFound, "not_found")
+			return
+		}
+		defer f.Close()
+		filename := filepath.Base(p.Path)
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+		w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+		_, _ = io.Copy(w, f)
+	}
+}
+
+// ListCatalogTags handles GET /api/v1/catalog/tags.
+// Returns tag → count, scoped to public apps only.
+func ListCatalogTags(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		rows, err := db.QueryContext(r.Context(),
+			`SELECT t.tag, COUNT(*) AS n
+			   FROM app_tags t
+			   JOIN apps a ON a.app_id = t.app_id
+			  WHERE a.visibility = 'public' AND a.latest_version != ''
+			  GROUP BY t.tag
+			  ORDER BY n DESC, t.tag ASC`,
+		)
+		if err != nil {
+			writeInternal(w, "catalog_tags_query", err)
+			return
+		}
+		defer rows.Close()
+		type tagCount struct {
+			Tag   string `json:"tag"`
+			Count int    `json:"count"`
+		}
+		out := make([]tagCount, 0)
+		for rows.Next() {
+			var tc tagCount
+			if err := rows.Scan(&tc.Tag, &tc.Count); err != nil {
+				writeInternal(w, "catalog_tags_scan", err)
+				return
+			}
+			out = append(out, tc)
+		}
+		if err := rows.Err(); err != nil {
+			writeInternal(w, "catalog_tags_rows", err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"tags": out,
+		})
+	}
+}
+
+// --- helpers ---
+
+func platformKeys(m map[string]manifest.Platform) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
