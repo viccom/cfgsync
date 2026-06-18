@@ -4,6 +4,45 @@ All notable changes to this project are documented in this file.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+App catalog feature track (in progress on `feat/app-market` branch).
+
+Planned scope:
+- App release management — `.tar.gz` package upload, manifest-driven
+  parsing, multi-platform binary layout, sha256 verification
+- Embedded documentation — `README.md` / `INSTALL.md` / `USAGE.md` /
+  `CHANGELOG.md` shipped inside the package, rendered by the platform
+- Public marketplace — browse-by-category, search, app detail pages,
+  version history, download endpoints
+- Developer upload API — admin (single-developer mode) uploads new
+  release via `POST /api/v1/dev/apps/{app_id}/releases`
+- Schema rewritten to v3 (fresh DB required; no migration path from v2)
+
+## [0.4.0] - 2026-06-18
+
+Final cfg-sync-only milestone before the app-market feature track.
+After this tag, `main` is frozen; active development happens on
+`feat/app-market` and merges back (as `v0.5.0`) when complete. The
+defensive branch `archive/cfg-sync-only` points at the same commit
+for any future hotfix on the cfg-sync-only line.
+
+### Added
+
+- `cmd/cloud-e2e`: headless REST e2e harness mirroring 1Remote client
+  CloudSyncService calls (connect-string flow, sync probes, optimistic
+  lock, version conflict, cross-app token, quota, history trim). Was
+  previously untracked.
+
+### Fixed
+
+- webui: redirect to `/apps` after login when URL is still `/login`
+
+### Notes
+
+- `cmd/salt-extract` was untracked and out of cfgsync scope (it is a
+  1Remote.exe binary analysis tool); never added to the tree.
+
 ## [0.3.0] - 2026-06-16
 
 Adds the embedded WebUI and a small backend endpoint to support it.
