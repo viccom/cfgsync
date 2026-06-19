@@ -65,13 +65,23 @@ func main() {
 		log.Fatalf("open repo: %v", err)
 	}
 
+	if removed, err := server.CleanupOrphans(database, repository); err != nil {
+		log.Printf("cleanup orphans: %v", err)
+	} else if removed > 0 {
+		log.Printf("cleanup orphans: removed %d stale release dir(s)", removed)
+	}
+
 	srv := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           server.New(cfg, database, repository),
 		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      15 * time.Second,
-		IdleTimeout:       60 * time.Second,
+		// Read/Write timeouts cover the full body transfer. A 200 MB package
+		// upload or catalog download on a ~5 Mbps link takes ~5-6 minutes, so
+		// 15 s (the previous value) would abort legitimate large transfers.
+		// ReadHeaderTimeout is left tight to keep slowloris protection.
+		ReadTimeout:  5 * time.Minute,
+		WriteTimeout: 5 * time.Minute,
+		IdleTimeout:  60 * time.Second,
 	}
 
 	errCh := make(chan error, 1)

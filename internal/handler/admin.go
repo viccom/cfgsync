@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/viccom/cfgsync/internal/auth"
 	"github.com/viccom/cfgsync/internal/model"
+	"github.com/viccom/cfgsync/internal/repo"
 )
 
 // appIDRegex enforces reverse-domain style: two or more dot-separated segments,
@@ -222,9 +224,12 @@ func AdminPatchApp(db *sql.DB) http.HandlerFunc {
 }
 
 // AdminDeleteApp removes an app_id. The schema's ON DELETE CASCADE on
-// configs/config_history/app_tokens (app_id REFERENCES apps(app_id)) wipes all
-// per-user data for this app atomically — no manual tx needed.
-func AdminDeleteApp(db *sql.DB) http.HandlerFunc {
+// configs/config_history/app_tokens/app_releases/app_tags wipes all per-user
+// data atomically. The FS side — {repo_root}/{app_id}/ — is not reachable
+// from CASCADE, so we explicitly DeleteApp after the DB commit succeeds.
+// Best-effort: FS errors are logged so operators can spot orphans, but do
+// not mask the success the client already earned.
+func AdminDeleteApp(db *sql.DB, repository *repo.Repo) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		appID := r.PathValue("app_id")
 		if appID == "" {
@@ -241,6 +246,9 @@ func AdminDeleteApp(db *sql.DB) http.HandlerFunc {
 		if n == 0 {
 			writeError(w, http.StatusNotFound, "not_found")
 			return
+		}
+		if err := repository.DeleteApp(appID); err != nil {
+			log.Printf("admin.delete_app_fs %s orphaned: %v", appID, err)
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}

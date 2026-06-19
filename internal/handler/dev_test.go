@@ -431,6 +431,81 @@ func TestDeleteRelease_NotFound(t *testing.T) {
 	}
 }
 
+// TestCompensatePromoteFailure_OverwriteLatestPreservesConsistency covers the
+// exact scenario N1 was filed for: PUT overwrites version X which is also the
+// current latest. A naive "restore prevLatest=X" compensation would re-point
+// apps.latest_version at a row we just deleted. pickLatestVersion(remaining)
+// must instead pick the next-newest surviving release.
+func TestCompensatePromoteFailure_OverwriteLatestPreservesConsistency(t *testing.T) {
+	env := newTestEnv(t)
+	adminUID := env.seedUser(t, "admin@example.com", "p12345678", true)
+	env.seedApp(t, "com.foo", "Foo", adminUID)
+
+	// Seed two releases: 1.0.0 (older) and 2.0.0 (latest). apps.latest_version
+	// points at 2.0.0 — the row that the failing PUT would have replaced.
+	seedReleaseRow(t, env, "com.foo", "1.0.0", adminUID)
+	seedReleaseRow(t, env, "com.foo", "2.0.0", adminUID)
+	if _, err := env.db.Exec(
+		`UPDATE apps SET latest_version = '2.0.0' WHERE app_id = 'com.foo'`,
+	); err != nil {
+		t.Fatalf("seed latest: %v", err)
+	}
+
+	// Simulate the post-commit Promote failure path: the new 2.0.0 row is
+	// already in place (in real life the tx just committed), and now we
+	// compensate.
+	compensatePromoteFailure(env.db, "com.foo", "2.0.0")
+
+	var latest string
+	if err := env.db.QueryRow(
+		`SELECT latest_version FROM apps WHERE app_id = 'com.foo'`,
+	).Scan(&latest); err != nil {
+		t.Fatalf("scan latest: %v", err)
+	}
+	if latest != "1.0.0" {
+		t.Errorf("latest_version=%q, want 1.0.0 (must point at a surviving release)", latest)
+	}
+
+	// 2.0.0 row must be gone; 1.0.0 must survive.
+	var n int
+	env.db.QueryRow(`SELECT COUNT(*) FROM app_releases WHERE app_id='com.foo' AND version='2.0.0'`).Scan(&n)
+	if n != 0 {
+		t.Errorf("2.0.0 row still present after compensation")
+	}
+	env.db.QueryRow(`SELECT COUNT(*) FROM app_releases WHERE app_id='com.foo' AND version='1.0.0'`).Scan(&n)
+	if n != 1 {
+		t.Errorf("1.0.0 row lost during compensation")
+	}
+}
+
+// TestCompensatePromoteFailure_LastReleaseClearsLatest covers the boundary:
+// when the deleted version was the only release, apps.latest_version must
+// become "" rather than pointing at a missing row.
+func TestCompensatePromoteFailure_LastReleaseClearsLatest(t *testing.T) {
+	env := newTestEnv(t)
+	adminUID := env.seedUser(t, "admin@example.com", "p12345678", true)
+	env.seedApp(t, "com.foo", "Foo", adminUID)
+
+	seedReleaseRow(t, env, "com.foo", "1.0.0", adminUID)
+	if _, err := env.db.Exec(
+		`UPDATE apps SET latest_version = '1.0.0' WHERE app_id = 'com.foo'`,
+	); err != nil {
+		t.Fatalf("seed latest: %v", err)
+	}
+
+	compensatePromoteFailure(env.db, "com.foo", "1.0.0")
+
+	var latest string
+	if err := env.db.QueryRow(
+		`SELECT latest_version FROM apps WHERE app_id = 'com.foo'`,
+	).Scan(&latest); err != nil {
+		t.Fatalf("scan latest: %v", err)
+	}
+	if latest != "" {
+		t.Errorf("latest_version=%q, want empty when no releases remain", latest)
+	}
+}
+
 // Smoke-test: rollback semantics. If DB tx fails after staging, the staging
 // dir is cleaned and no half-state leaks.
 func TestUploadRelease_DbConflictRollsBackStaging(t *testing.T) {

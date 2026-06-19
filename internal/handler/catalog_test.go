@@ -156,6 +156,42 @@ func TestGetCatalogApp_Success(t *testing.T) {
 	}
 }
 
+// TestGetCatalogApp_LatestVersionDanglingReturnsNull covers N7: if
+// apps.latest_version points at a release row that no longer exists (data
+// inconsistency — e.g. a bug or out-of-band deletion), GetCatalogApp must
+// emit latest_release=null and a 200, not silently return a half-empty
+// metadata block. The SPA can then prompt the user to retry instead of
+// rendering dead URLs.
+func TestGetCatalogApp_LatestVersionDanglingReturnsNull(t *testing.T) {
+	env := newTestEnv(t)
+	admin := env.seedUser(t, "admin@example.com", "p12345678", true)
+	env.seedApp(t, "com.foo", "Foo", admin)
+	// Point latest_version at a release that was never inserted.
+	if _, err := env.db.Exec(
+		`UPDATE apps SET latest_version = '9.9.9' WHERE app_id = 'com.foo'`,
+	); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/api/v1/catalog/apps/com.foo", &bytes.Buffer{})
+	req.SetPathValue("app_id", "com.foo")
+	w := httptest.NewRecorder()
+	GetCatalogApp(env.db).ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if strings.Contains(body, `"latest_release":{`) {
+		t.Errorf("expected latest_release to be absent/null, got %s", body)
+	}
+	// Must NOT contain a download_url — the SPA would otherwise render a
+	// link that 404s on click.
+	if strings.Contains(body, `"download_url"`) {
+		t.Errorf("response leaked download_url for dangling latest: %s", body)
+	}
+}
+
 func TestGetCatalogApp_PrivateNotFound(t *testing.T) {
 	env := newTestEnv(t)
 	admin := env.seedUser(t, "admin@example.com", "p12345678", true)

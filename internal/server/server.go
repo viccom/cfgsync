@@ -3,6 +3,8 @@ package server
 
 import (
 	"database/sql"
+	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -13,6 +15,42 @@ import (
 	"github.com/viccom/cfgsync/internal/repo"
 	"github.com/viccom/cfgsync/internal/webui"
 )
+
+// CleanupOrphans removes release directories whose corresponding DB row is
+// missing. Called once at startup so FS state converges with DB state after
+// a crashed Promote, an AdminDeleteApp whose FS step partially failed, or
+// any out-of-band SQL DELETE.
+//
+// Best-effort: per-release errors are logged, not returned, so one bad dir
+// does not block startup. Returns the count of orphans removed.
+func CleanupOrphans(db *sql.DB, repository *repo.Repo) (int, error) {
+	refs, err := repository.ListReleaseDirs()
+	if err != nil {
+		return 0, fmt.Errorf("scan releases: %w", err)
+	}
+	removed := 0
+	for _, ref := range refs {
+		var x int
+		err := db.QueryRow(
+			`SELECT 1 FROM app_releases WHERE app_id = ? AND version = ?`,
+			ref.AppID, ref.Version,
+		).Scan(&x)
+		if err == nil {
+			continue
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			log.Printf("cleanup_orphans: check %s/%s: %v", ref.AppID, ref.Version, err)
+			continue
+		}
+		if err := repository.DeleteRelease(ref.AppID, ref.Version); err != nil {
+			log.Printf("cleanup_orphans: delete %s/%s: %v", ref.AppID, ref.Version, err)
+			continue
+		}
+		log.Printf("cleanup_orphans: removed orphan %s/%s", ref.AppID, ref.Version)
+		removed++
+	}
+	return removed, nil
+}
 
 // New builds the top-level HTTP handler.
 func New(cfg *config.Config, db *sql.DB, repo *repo.Repo) http.Handler {
@@ -44,7 +82,7 @@ func New(cfg *config.Config, db *sql.DB, repo *repo.Repo) http.Handler {
 	mux.Handle("POST /api/v1/admin/apps", adminChain(handler.AdminCreateApp(db)))
 	mux.Handle("GET /api/v1/admin/apps/{app_id}", adminChain(handler.AdminGetApp(db)))
 	mux.Handle("PATCH /api/v1/admin/apps/{app_id}", adminChain(handler.AdminPatchApp(db)))
-	mux.Handle("DELETE /api/v1/admin/apps/{app_id}", adminChain(handler.AdminDeleteApp(db)))
+	mux.Handle("DELETE /api/v1/admin/apps/{app_id}", adminChain(handler.AdminDeleteApp(db, repo)))
 	mux.Handle("POST /api/v1/admin/users/{user_id}/promote", adminChain(handler.AdminPromoteUser(db)))
 	mux.Handle("GET /api/v1/admin/users", adminChain(handler.AdminListUsers(db)))
 

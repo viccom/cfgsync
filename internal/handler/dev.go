@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -182,14 +183,6 @@ func processUpload(db *sql.DB, cfg *config.Config, repository *repo.Repo, allowO
 		}
 		now := time.Now().Unix()
 
-		// Capture the previous apps.latest_version so we can compensate
-		// if Promote fails after Commit. Without this we'd leave the apps
-		// cache pointing at a release whose package is missing on disk.
-		var prevLatest string
-		_ = db.QueryRowContext(r.Context(),
-			`SELECT latest_version FROM apps WHERE app_id = ?`, appID,
-		).Scan(&prevLatest)
-
 		tx, err := db.BeginTx(r.Context(), nil)
 		if err != nil {
 			repository.Discard(stage.StagingDir)
@@ -273,26 +266,11 @@ func processUpload(db *sql.DB, cfg *config.Config, repository *repo.Repo, allowO
 
 		// 11. Promote staging → final. FS operations can't be enrolled in
 		// the SQL tx, so a failure here leaves the DB row committed but
-		// the package absent on disk. Compensate by deleting the release
-		// row and reverting apps.latest_version to its previous value so
-		// the catalog API and apps cache stay consistent. The compensation
-		// is best-effort — its own errors are logged but do not mask the
-		// original Promote error.
+		// the package absent on disk. Compensate via compensatePromoteFailure.
 		if _, err := repository.Promote(stage.StagingDir, appID, mf.Version); err != nil {
 			repository.Discard(stage.StagingDir)
 			log.Printf("dev.promote_failed %s/%s after DB commit: %v — compensating", appID, mf.Version, err)
-			if _, derr := db.ExecContext(r.Context(),
-				`DELETE FROM app_releases WHERE app_id = ? AND version = ?`,
-				appID, mf.Version,
-			); derr != nil {
-				log.Printf("dev.compensate_delete_failed %s/%s: %v", appID, mf.Version, derr)
-			}
-			if _, derr := db.ExecContext(r.Context(),
-				`UPDATE apps SET latest_version = ?, updated_at = ? WHERE app_id = ?`,
-				prevLatest, time.Now().Unix(), appID,
-			); derr != nil {
-				log.Printf("dev.compensate_apps_revert_failed %s: %v", appID, derr)
-			}
+			compensatePromoteFailure(db, appID, mf.Version)
 			writeError(w, http.StatusInternalServerError, "internal")
 			return
 		}
@@ -443,6 +421,82 @@ func DeleteRelease(db *sql.DB, repository *repo.Repo) http.HandlerFunc {
 			log.Printf("dev.delete_fs %s/%s orphaned: %v", appID, version, err)
 		}
 		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// compensatePromoteFailure reverts the DB-side effects of processUpload when
+// the SQL tx has committed but the subsequent Promote (FS rename) failed: it
+// deletes the release row and recomputes apps.latest_version from surviving
+// releases.
+//
+// Three deliberate choices vs the previous inline compensation:
+//
+//  1. Independent context. The request context is often already cancelled by
+//     the time Promote fails (I/O timeouts frequently follow client disconnect),
+//     which would make ExecContext return context.Canceled and leave the
+//     orphaned row in place.
+//  2. Atomic. DELETE + UPDATE run inside one tx so partial failure cannot
+//     leave apps.latest_version pointing at the deleted row.
+//  3. pickLatestVersion(remaining) instead of restoring a captured prev value.
+//     In the PUT-overwrite case where version X was latest and is being
+//     replaced, prev==X but X is now deleted — restoring prev would re-point
+//     latest at a missing row. Recomputing from the remaining releases always
+//     yields a value that actually exists (or "" if no releases remain).
+//
+// Best-effort: each failure mode is logged so the operator can spot
+// inconsistent state in the access log. The caller still reports 500 to the
+// client regardless of whether compensation succeeded.
+func compensatePromoteFailure(db *sql.DB, appID, version string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		log.Printf("dev.compensate_begin_failed %s/%s: %v", appID, version, err)
+		return
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM app_releases WHERE app_id = ? AND version = ?`,
+		appID, version,
+	); err != nil {
+		log.Printf("dev.compensate_delete_failed %s/%s: %v", appID, version, err)
+		return
+	}
+	rows, err := tx.QueryContext(ctx,
+		`SELECT version FROM app_releases WHERE app_id = ?`,
+		appID,
+	)
+	if err != nil {
+		log.Printf("dev.compensate_recompute_query_failed %s: %v", appID, err)
+		return
+	}
+	var versions []string
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			rows.Close()
+			log.Printf("dev.compensate_recompute_scan_failed %s: %v", appID, err)
+			return
+		}
+		versions = append(versions, v)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		log.Printf("dev.compensate_recompute_rows_failed %s: %v", appID, err)
+		return
+	}
+	newLatest := pickLatestVersion(versions)
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE apps SET latest_version = ?, updated_at = ? WHERE app_id = ?`,
+		newLatest, time.Now().Unix(), appID,
+	); err != nil {
+		log.Printf("dev.compensate_apps_revert_failed %s: %v", appID, err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		log.Printf("dev.compensate_commit_failed %s: %v", appID, err)
 	}
 }
 

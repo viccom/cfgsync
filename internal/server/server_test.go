@@ -150,6 +150,74 @@ func openTempRepo(t *testing.T) *repo.Repo {
 	return r
 }
 
+// TestCleanupOrphans_RemovesStaleReleaseDirs covers the N9 fix: a release
+// directory whose DB row is missing must be removed at startup so FS state
+// converges with DB state after a crash or out-of-band deletion.
+func TestCleanupOrphans_RemovesStaleReleaseDirs(t *testing.T) {
+	dbase := openTempDB(t)
+	r := openTempRepo(t)
+
+	// Seed one legit release (DB + FS) and one orphan (FS only).
+	now := time.Now().Unix()
+	mustExec(t, dbase, `INSERT INTO users (id, email, password_hash, is_admin, created_at, updated_at)
+	                    VALUES ('u1', 'a@b', 'x', 1, ?, ?)`, now, now)
+	mustExec(t, dbase, `INSERT INTO apps (app_id, display_name, description, created_at, created_by, updated_at, visibility, latest_version)
+	                    VALUES ('com.foo', 'Foo', '', ?, 'u1', ?, 'public', '1.0.0')`, now, now)
+	mustExec(t, dbase, `INSERT INTO app_releases (app_id, version, version_major, version_minor, version_patch, version_pre,
+	                    manifest_yaml, manifest_json, package_size, package_sha256, docs_json, assets_json, release_notes, created_at, created_by)
+	                    VALUES ('com.foo', '1.0.0', 1, 0, 0, '', 'x', '{}', 1, 'x', '{}', '[]', '', ?, 'u1')`, now)
+
+	// Create both release dirs on disk (skip Stage/Promote plumbing for brevity).
+	for _, v := range []string{"1.0.0", "2.0.0"} {
+		dir := filepath.Join(r.Root(), "com.foo", v)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+		// Drop a sentinel file so the dir is non-empty.
+		if err := os.WriteFile(filepath.Join(dir, "sentinel"), []byte("x"), 0o600); err != nil {
+			t.Fatalf("write sentinel: %v", err)
+		}
+	}
+	// Also drop a _staging dir to confirm it's NOT touched.
+	stagingDir := filepath.Join(r.Root(), "_staging", "com.foo", "upload-1")
+	if err := os.MkdirAll(stagingDir, 0o700); err != nil {
+		t.Fatalf("mkdir staging: %v", err)
+	}
+
+	removed, err := CleanupOrphans(dbase, r)
+	if err != nil {
+		t.Fatalf("CleanupOrphans: %v", err)
+	}
+	if removed != 1 {
+		t.Errorf("removed=%d, want 1 (only 2.0.0 should be cleaned; 1.0.0 has a DB row)", removed)
+	}
+	if !r.ReleaseExists("com.foo", "1.0.0") {
+		t.Errorf("CleanupOrphans deleted a release that has a DB row")
+	}
+	if r.ReleaseExists("com.foo", "2.0.0") {
+		t.Errorf("CleanupOrphans did not delete orphan 2.0.0")
+	}
+	// Staging must be untouched — those are in-flight uploads, not promoted releases.
+	if _, err := os.Stat(stagingDir); err != nil {
+		t.Errorf("staging dir was disturbed by CleanupOrphans: %v", err)
+	}
+}
+
+// TestCleanupOrphans_NoOrphansIsZeroCount verifies the no-op path: with no
+// orphans present the function returns 0 cleanly.
+func TestCleanupOrphans_NoOrphansIsZeroCount(t *testing.T) {
+	dbase := openTempDB(t)
+	r := openTempRepo(t)
+
+	removed, err := CleanupOrphans(dbase, r)
+	if err != nil {
+		t.Fatalf("CleanupOrphans on empty repo: %v", err)
+	}
+	if removed != 0 {
+		t.Errorf("removed=%d, want 0 on empty repo", removed)
+	}
+}
+
 func mustExec(t *testing.T, d *sql.DB, q string, args ...interface{}) {
 	t.Helper()
 	if _, err := d.Exec(q, args...); err != nil {

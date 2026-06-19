@@ -263,25 +263,44 @@ func GetCatalogApp(db *sql.DB) http.HandlerFunc {
 
 		// Latest release metadata (homepage/license/author/etc. come from
 		// the manifest cache — apps table doesn't duplicate those fields).
+		// apps.latest_version may point at a release row that was deleted
+		// out-of-band or whose manifest_json is corrupt; in either case we
+		// log the inconsistency and emit latest_release=null rather than
+		// half-empty metadata that would confuse the SPA.
 		var (
 			manifestJSON     string
 			packageSize      int64
 			releaseCreatedAt int64
+			releaseMissing   bool
 		)
 		if latestVersion != "" {
-			_ = db.QueryRowContext(r.Context(),
+			err := db.QueryRowContext(r.Context(),
 				`SELECT manifest_json, package_size, created_at
 				   FROM app_releases WHERE app_id = ? AND version = ?`,
 				appID, latestVersion,
 			).Scan(&manifestJSON, &packageSize, &releaseCreatedAt)
+			if errors.Is(err, sql.ErrNoRows) {
+				log.Printf("catalog.app %s: apps.latest_version=%q but release row missing",
+					appID, latestVersion)
+				releaseMissing = true
+			} else if err != nil {
+				writeInternal(w, "catalog_app_release_fetch", err)
+				return
+			}
 		}
 		var mf manifest.Manifest
-		_ = json.Unmarshal([]byte(manifestJSON), &mf)
+		if manifestJSON != "" {
+			if err := json.Unmarshal([]byte(manifestJSON), &mf); err != nil {
+				log.Printf("catalog.app %s: corrupt manifest_json for %s: %v",
+					appID, latestVersion, err)
+				releaseMissing = true
+			}
+		}
 
 		// Build URLs only when a release exists.
 		var iconURL, downloadURL, releaseNotesURL string
 		var platforms []string
-		if latestVersion != "" {
+		if latestVersion != "" && !releaseMissing {
 			base := releaseBase(appID, latestVersion)
 			if iconPath != "" {
 				iconURL = base + "/assets/" + iconPath
@@ -322,7 +341,7 @@ func GetCatalogApp(db *sql.DB) http.HandlerFunc {
 			"updated_at":   updatedAt,
 			"created_at":   createdAt,
 		}
-		if latestVersion != "" {
+		if latestVersion != "" && !releaseMissing {
 			resp["latest_release"] = map[string]interface{}{
 				"version":           latestVersion,
 				"created_at":        releaseCreatedAt,
@@ -416,7 +435,11 @@ func GetCatalogRelease(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		var mf manifest.Manifest
-		_ = json.Unmarshal([]byte(manifestJSON), &mf)
+		if err := json.Unmarshal([]byte(manifestJSON), &mf); err != nil {
+			log.Printf("catalog.release %s/%s: corrupt manifest_json: %v", appID, version, err)
+			writeError(w, http.StatusInternalServerError, "internal")
+			return
+		}
 		var platforms []string
 		for k := range mf.Platforms {
 			platforms = append(platforms, k)
@@ -586,7 +609,11 @@ func DownloadCatalogRelease(db *sql.DB, repository *repo.Repo) http.HandlerFunc 
 			return
 		}
 		var mf manifest.Manifest
-		_ = json.Unmarshal([]byte(manifestJSON), &mf)
+		if err := json.Unmarshal([]byte(manifestJSON), &mf); err != nil {
+			log.Printf("catalog.download %s/%s: corrupt manifest_json: %v", appID, version, err)
+			writeError(w, http.StatusInternalServerError, "internal")
+			return
+		}
 		p, ok := mf.Platforms[platform]
 		if !ok {
 			log.Printf("catalog.download: platform %q not in manifest platforms=%+v", platform, mf.Platforms)

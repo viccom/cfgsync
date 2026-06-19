@@ -116,6 +116,22 @@ Do not bypass this protocol — clients depend on the 409 contract to detect con
 | 400 | `invalid_email_or_password` | register/login format check |
 | 400 | `invalid_app_id` | app_id fails regex or `display_name` empty |
 | 400 | `missing_updated_by` | PUT config without `updated_by` |
+| 400 | `invalid_multipart` | upload request has no usable multipart body |
+| 400 | `missing_package` | multipart upload has no `package` field |
+| 400 | `invalid_package` | uploaded tar.gz missing/undecompressible |
+| 400 | `manifest_required` | uploaded package has no `manifest.yaml` |
+| 400 | `manifest_too_large` | manifest.yaml exceeds `MAX_MANIFEST_BYTES` |
+| 400 | `invalid_manifest` | manifest parse/validation failure (includes `fields`) |
+| 400 | `version_mismatch` | PUT path version != manifest.yaml `version` |
+| 400 | `readme_required` | package has no `README.md` |
+| 400 | `doc_read_failed` | `README/INSTALL/USAGE/CHANGELOG.md` could not be opened |
+| 400 | `doc_too_large` | a doc exceeds `MAX_DOC_BYTES` |
+| 400 | `icon_read_failed` | `icon.png` present but unreadable |
+| 400 | `icon_too_large` | `icon.png` exceeds `MAX_ICON_BYTES` |
+| 400 | `too_many_screenshots` | `screenshots/` count exceeds `MAX_SCREENSHOTS` |
+| 400 | `screenshot_read_failed` | a screenshot file could not be opened |
+| 400 | `screenshot_too_large` | a screenshot exceeds `MAX_SCREENSHOT_BYTES` |
+| 400 | `invalid_platform` | `?platform=` for download not in manifest (includes `available`/`requested`) |
 | 401 | `unauthorized` | missing Authorization header |
 | 401 | `invalid_token` | JWT invalid/expired or app_token not found |
 | 401 | `invalid_credentials` | login email/password mismatch |
@@ -124,10 +140,12 @@ Do not bypass this protocol — clients depend on the 409 contract to detect con
 | 404 | `not_found` | resource does not exist |
 | 409 | `email_already_registered` | register email conflict |
 | 409 | `app_id_exists` | admin create app_id conflict |
-| 409 | `version_conflict` | PUT version mismatch (includes `current_*` fields) |
+| 409 | `version_conflict` | PUT config version mismatch (includes `current_*` fields) |
+| 409 | `version_exists` | POST upload for (app_id, version) that already exists (includes `version`) |
 | 413 | `payload_too_large` | single PUT > `MAX_PAYLOAD_BYTES` (includes `max_bytes`) |
 | 413 | `storage_quota_exceeded` | user total storage > `USER_STORAGE_LIMIT_MB` (includes `used_bytes`/`limit_bytes`) |
 | 413 | `app_token_limit_reached` | user app_token count at limit (includes `limit`) |
+| 413 | `package_too_large` | uploaded package > `MAX_PACKAGE_BYTES` (includes `max_bytes`) |
 | 500 | `internal` | panic or DB error |
 
 ## Deploy

@@ -249,8 +249,15 @@ func (r *Repo) Promote(stagingDir, appID, version string) (string, error) {
 		_ = os.Rename(final, old)
 	}
 	if err := os.Rename(stagingDir, final); err != nil {
+		// Try to roll back so final still points at the previous release.
+		// If roll-back also fails, final is gone but .old must still be
+		// removed — otherwise it sits on disk forever: the next Promote
+		// for this (app_id, version) sees final missing and skips the
+		// .old dance, so nothing revisits the orphan.
 		if _, statErr := os.Stat(old); statErr == nil {
-			_ = os.Rename(old, final)
+			if rerr := os.Rename(old, final); rerr != nil {
+				_ = os.RemoveAll(old)
+			}
 		}
 		return "", fmt.Errorf("promote staging to final: %w", err)
 	}
@@ -268,6 +275,21 @@ func (r *Repo) Discard(stagingDir string) {
 func (r *Repo) DeleteRelease(appID, version string) error {
 	if err := os.RemoveAll(r.releasePath(appID, version)); err != nil {
 		return fmt.Errorf("delete release %s/%s: %w", appID, version, err)
+	}
+	return nil
+}
+
+// DeleteApp removes the entire {root}/{app_id}/ tree. Used by AdminDeleteApp
+// to clean up the file system after the DB's ON DELETE CASCADE has wiped all
+// release rows — CASCADE cannot reach the file system. Idempotent: returns
+// nil if the directory didn't exist.
+//
+// appID safety: callers validate appID via appIDRegex (reverse-domain,
+// [a-z0-9-.] only, no path separators) before reaching here, so
+// filepath.Join cannot escape {root}.
+func (r *Repo) DeleteApp(appID string) error {
+	if err := os.RemoveAll(filepath.Join(r.root, appID)); err != nil {
+		return fmt.Errorf("delete app %s: %w", appID, err)
 	}
 	return nil
 }
@@ -350,6 +372,54 @@ func (r *Repo) ListExtracted(appID, version string) ([]string, error) {
 		return nil
 	})
 	return out, err
+}
+
+// ReleaseRef names one {root}/{app_id}/{version}/ directory on disk.
+type ReleaseRef struct {
+	AppID   string
+	Version string
+	Path    string
+}
+
+// ListReleaseDirs walks {root} top-down and yields every release directory
+// as a ReleaseRef. _staging/ is skipped — those are in-flight uploads.
+// Directly-named files at any level are skipped (release dirs are always
+// two levels deep: {root}/{app_id}/{version}/).
+//
+// Used at server startup to diff against app_releases: any ReleaseRef whose
+// (app_id, version) has no DB row is an orphan left by a crashed Promote or
+// an out-of-band deletion, and the caller should DeleteRelease it.
+func (r *Repo) ListReleaseDirs() ([]ReleaseRef, error) {
+	var out []ReleaseRef
+	entries, err := os.ReadDir(r.root)
+	if err != nil {
+		return nil, err
+	}
+	for _, appEntry := range entries {
+		if !appEntry.IsDir() {
+			continue
+		}
+		appID := appEntry.Name()
+		if appID == "_staging" {
+			continue
+		}
+		appDir := filepath.Join(r.root, appID)
+		versionEntries, err := os.ReadDir(appDir)
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", appDir, err)
+		}
+		for _, vEntry := range versionEntries {
+			if !vEntry.IsDir() {
+				continue
+			}
+			out = append(out, ReleaseRef{
+				AppID:   appID,
+				Version: vEntry.Name(),
+				Path:    filepath.Join(appDir, vEntry.Name()),
+			})
+		}
+	}
+	return out, nil
 }
 
 func (r *Repo) stagingPath(appID, uploadID string) string {

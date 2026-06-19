@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -323,7 +325,7 @@ func TestAdminDeleteApp_CascadesUserData(t *testing.T) {
 		t.Fatalf("seed token: %v", err)
 	}
 
-	h := adminChain(env, AdminDeleteApp(env.db))
+	h := adminChain(env, AdminDeleteApp(env.db, env.repo))
 	w := doAdminAppPath(h, "DELETE", "com.foo", tok, nil)
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("expected 204, got %d body=%s", w.Code, w.Body.String())
@@ -344,10 +346,44 @@ func TestAdminDeleteApp_NotFound(t *testing.T) {
 	adminUID := env.seedUser(t, "admin@example.com", "p12345678", true)
 	tok := env.userToken(adminUID, "admin@example.com", true)
 
-	h := adminChain(env, AdminDeleteApp(env.db))
+	h := adminChain(env, AdminDeleteApp(env.db, env.repo))
 	w := doAdminAppPath(h, "DELETE", "nonexistent", tok, nil)
 	if w.Code != http.StatusNotFound {
 		t.Errorf("expected 404, got %d", w.Code)
+	}
+}
+
+// TestAdminDeleteApp_RemovesFSTree covers the N5 fix: after uploading a
+// release and then deleting the app, the {repo_root}/{app_id}/ directory
+// must be gone — CASCADE can reach DB rows but not the file system.
+func TestAdminDeleteApp_RemovesFSTree(t *testing.T) {
+	env := newTestEnv(t)
+	adminUID := env.seedUser(t, "admin@example.com", "p12345678", true)
+	env.seedApp(t, "com.foo", "Foo", adminUID)
+	tok := env.userToken(adminUID, "admin@example.com", true)
+
+	// Upload a release so {repo_root}/com.foo/1.0.0/ exists on disk.
+	upload := adminChain(env, UploadRelease(env.db, env.cfg, env.repo))
+	w := uploadReq(t, upload, "POST", "/api/v1/dev/apps/com.foo/releases",
+		"com.foo", "", tok, validPkg(t, ""))
+	if w.Code != http.StatusOK {
+		t.Fatalf("seed upload failed: %d body=%s", w.Code, w.Body.String())
+	}
+	if !env.repo.ReleaseExists("com.foo", "1.0.0") {
+		t.Fatalf("seed upload did not promote to FS")
+	}
+
+	h := adminChain(env, AdminDeleteApp(env.db, env.repo))
+	w = doAdminAppPath(h, "DELETE", "com.foo", tok, nil)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("expected 204, got %d body=%s", w.Code, w.Body.String())
+	}
+
+	if env.repo.ReleaseExists("com.foo", "1.0.0") {
+		t.Errorf("FS release dir survived AdminDeleteApp")
+	}
+	if _, err := os.Stat(filepath.Join(env.repo.Root(), "com.foo")); !os.IsNotExist(err) {
+		t.Errorf("FS app dir survived AdminDeleteApp (err=%v)", err)
 	}
 }
 

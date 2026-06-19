@@ -231,6 +231,13 @@ func TestPromote_OverwritesExisting(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(filepath.Dir(pi.Path), "extracted", "NEW.md")); err != nil {
 		t.Errorf("NEW.md missing after overwrite: %v", err)
 	}
+	// After a successful overwrite the .old directory must be cleaned up —
+	// it's only meant to exist transiently during the rename swap. A stale
+	// .old would survive indefinitely because the next Promote skips the
+	// swap when final already exists.
+	if _, err := os.Stat(pi.Path + ".old"); !os.IsNotExist(err) {
+		t.Errorf("stale .old dir present after overwrite (err=%v)", err)
+	}
 }
 
 func TestDeleteRelease_Idempotent(t *testing.T) {
@@ -246,6 +253,42 @@ func TestDeleteRelease_Idempotent(t *testing.T) {
 	}
 	if r.ReleaseExists("com.foo", "1.0.0") {
 		t.Errorf("release still present after delete")
+	}
+}
+
+// TestDeleteApp_RemovesEntireAppTree covers the N5 fix: AdminDeleteApp
+// CASCADE-deletes the DB rows but cannot reach the FS, so DeleteApp must
+// wipe the whole {root}/{app_id}/ subtree including all versions.
+func TestDeleteApp_RemovesEntireAppTree(t *testing.T) {
+	r := newTestRepo(t)
+
+	// Seed two release trees + a staging dir for the same app.
+	for _, v := range []string{"1.0.0", "2.0.0"} {
+		body := makeTarGz(t, map[string]string{"manifest.yaml": "x"})
+		res, _ := r.Stage("com.foo", "upload-"+v, bytes.NewReader(body), 1024)
+		if _, err := r.Promote(res.StagingDir, "com.foo", v); err != nil {
+			t.Fatalf("promote %s: %v", v, err)
+		}
+	}
+
+	if err := r.DeleteApp("com.foo"); err != nil {
+		t.Fatalf("DeleteApp: %v", err)
+	}
+	if r.ReleaseExists("com.foo", "1.0.0") || r.ReleaseExists("com.foo", "2.0.0") {
+		t.Errorf("release dir survived DeleteApp")
+	}
+	// The entire {root}/com.foo/ directory must be gone.
+	if _, err := os.Stat(filepath.Join(r.Root(), "com.foo")); !os.IsNotExist(err) {
+		t.Errorf("app dir still present after DeleteApp (err=%v)", err)
+	}
+}
+
+// TestDeleteApp_Idempotent verifies the no-op path: deleting an app that
+// was never uploaded must succeed.
+func TestDeleteApp_Idempotent(t *testing.T) {
+	r := newTestRepo(t)
+	if err := r.DeleteApp("never.uploaded"); err != nil {
+		t.Errorf("DeleteApp on absent dir must be no-op, got %v", err)
 	}
 }
 
