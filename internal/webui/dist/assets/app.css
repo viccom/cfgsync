@@ -835,3 +835,76 @@ textarea { font-family: var(--font-mono); min-height: 88px; resize: vertical; }
   .catalog-detail-header { flex-direction: column; }
   .catalog-detail-icon { width: 64px; height: 64px; }
 }
+
+/* ============================================================
+   Dev release management — drag-drop upload, progress, mono SHA
+   ============================================================ */
+.dropzone {
+  border: 2px dashed var(--border-muted, #d0d7de);
+  border-radius: var(--radius-md, 8px);
+  padding: var(--space-5, 32px);
+  text-align: center;
+  cursor: pointer;
+  background: var(--bg-subtle, #f6f8fa);
+  transition: background 120ms, border-color 120ms;
+}
+.dropzone:hover { background: var(--bg-hover, #ebeef1); }
+.dropzone-active {
+  border-color: var(--blue-5, #218bff);
+  background: var(--blue-1, #ddf4ff);
+}
+.dropzone-hint { color: var(--text-muted); }
+.dropzone-hint-icon {
+  font-size: 32px; margin-bottom: var(--space-2);
+  color: var(--text-muted);
+}
+.dropzone-file {
+  display: flex; flex-direction: column; gap: 4px;
+  font-weight: 600;
+}
+.dropzone-file-name { word-break: break-all; }
+
+.progress {
+  position: relative;
+  height: 22px;
+  background: var(--bg-subtle, #f6f8fa);
+  border-radius: var(--radius-sm, 4px);
+  overflow: hidden;
+  border: 1px solid var(--border-muted, #d0d7de);
+}
+.progress-bar {
+  position: absolute; top: 0; left: 0; bottom: 0;
+  background: var(--blue-5, #218bff);
+  transition: width 200ms;
+}
+.progress-label {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: var(--fs-xs, 12px); font-weight: 600;
+  color: var(--text-default, #1f2328);
+  mix-blend-mode: difference;
+}
+
+.mono-sm {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--fs-xs, 12px);
+  color: var(--text-muted);
+}
+
+.hint-list {
+  margin: var(--space-2) 0 0;
+  padding-left: var(--space-4);
+}
+.hint-list li { margin: 4px 0; font-size: var(--fs-sm); color: var(--text-muted); }
+
+.manifest-err-list {
+  margin: 4px 0 0;
+  padding-left: var(--space-4);
+  font-size: var(--fs-sm);
+}
+.manifest-err-list li code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--fs-xs);
+  background: var(--bg-subtle, #f6f8fa);
+  padding: 1px 4px; border-radius: 3px;
+}

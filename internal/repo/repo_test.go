@@ -149,6 +149,66 @@ func TestExtract_WritesFiles(t *testing.T) {
 	}
 }
 
+// TestExtract_AcceptsTarWithDirEntries covers a regression: real tar.gz
+// files produced by GNU/BSD tar carry explicit TypeDir entries with a
+// trailing slash (e.g. "bin/", "bin/linux-amd64/"). sanitizeJoin rejected
+// the empty trailing segment, returning "unsafe path" and surfacing as
+// a 400 invalid_package in the dev upload API. Extract must accept these.
+func TestExtract_AcceptsTarWithDirEntries(t *testing.T) {
+	r := newTestRepo(t)
+	// Build a tar.gz the way `tar -czf` does: emit dir entries before
+	// their children, with trailing slashes in the name.
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	entries := []struct {
+		name     string
+		typeflag byte
+		body     string
+	}{
+		{name: "./", typeflag: tar.TypeDir},
+		{name: "bin/", typeflag: tar.TypeDir},
+		{name: "bin/linux-amd64/", typeflag: tar.TypeDir},
+		{name: "manifest.yaml", typeflag: tar.TypeReg, body: "schema_version: 1\n"},
+		{name: "README.md", typeflag: tar.TypeReg, body: "# hi\n"},
+		{name: "bin/linux-amd64/app", typeflag: tar.TypeReg, body: "binary\n"},
+	}
+	for _, e := range entries {
+		hdr := &tar.Header{Name: e.name, Mode: 0o644, Typeflag: e.typeflag}
+		if e.typeflag == tar.TypeReg {
+			hdr.Size = int64(len(e.body))
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatalf("write header %s: %v", e.name, err)
+		}
+		if e.body != "" {
+			if _, err := tw.Write([]byte(e.body)); err != nil {
+				t.Fatalf("write body %s: %v", e.name, err)
+			}
+		}
+	}
+	tw.Close()
+	gz.Close()
+
+	res, err := r.Stage("com.foo", "1.0.0", bytes.NewReader(buf.Bytes()), 10*1024*1024)
+	if err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	paths, err := r.Extract(res.StagingDir)
+	if err != nil {
+		t.Fatalf("Extract failed on tar with dir entries: %v", err)
+	}
+	got := make(map[string]bool, len(paths))
+	for _, p := range paths {
+		got[p] = true
+	}
+	for _, want := range []string{"manifest.yaml", "README.md", "bin/linux-amd64/app"} {
+		if !got[want] {
+			t.Errorf("missing %q in extracted paths %+v", want, paths)
+		}
+	}
+}
+
 func TestExtract_RejectsZipSlip(t *testing.T) {
 	r := newTestRepo(t)
 	// Build a tar.gz with one entry whose name escapes via "../".

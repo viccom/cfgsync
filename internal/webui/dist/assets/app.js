@@ -46,6 +46,24 @@ const ERR_MSGS = {
   payload_too_large: '配置超过 4 MB',
   storage_quota_exceeded: '存储配额已满',
   version_conflict: '配置已被其他设备更新',
+  invalid_multipart: '上传请求格式错误（缺少 multipart body）',
+  missing_package: '未选择上传文件',
+  invalid_package: '压缩包无法解析（不是合法的 tar.gz）',
+  manifest_required: '压缩包缺少 manifest.yaml',
+  manifest_too_large: 'manifest.yaml 超过大小限制',
+  invalid_manifest: 'manifest.yaml 校验失败',
+  version_mismatch: 'URL 中的版本号与 manifest.yaml 不一致',
+  readme_required: '压缩包缺少 README.md',
+  doc_read_failed: '文档读取失败',
+  doc_too_large: '文档超过大小限制',
+  icon_read_failed: 'icon.png 读取失败',
+  icon_too_large: 'icon.png 超过大小限制',
+  too_many_screenshots: '截图数量超过上限',
+  screenshot_read_failed: '截图读取失败',
+  screenshot_too_large: '截图超过大小限制',
+  invalid_platform: '请求的平台不存在',
+  version_exists: '该版本已存在（用 PUT 覆盖）',
+  package_too_large: '压缩包超过大小限制',
   internal: '服务器内部错误，请稍后重试',
 };
 
@@ -56,6 +74,12 @@ const jwtSignal = signal(localStorage.getItem(LS_JWT) || null);
 const refreshSignal = signal(localStorage.getItem(LS_REFRESH) || null);
 const userSignal = computed(() => (jwtSignal.value ? decodeJwt(jwtSignal.value) : null));
 const routeSignal = signal(parseLocation());
+// routeTickSignal increments on every navigate() call. useApi subscribes to
+// it so list pages automatically refetch when the user returns to them
+// (e.g. AdminApps after editing one row, DevAppList after uploading a
+// release). Without it, same-path navigates would show stale data because
+// useApi's path string didn't change.
+const routeTickSignal = signal(0);
 const toastSignal = signal(null);        // { kind, text, id } | null
 const menuOpenSignal = signal(false);    // user dropdown
 
@@ -64,17 +88,19 @@ const menuOpenSignal = signal(false);    // user dropdown
 // ============================================================
 function parseLocation() {
   const path = location.pathname || '/';
-  return { path, segments: path.split('/').filter(Boolean) };
+  return { path, segments: path.split('/').filter(Boolean), search: location.search || '' };
 }
 function navigate(to) {
-  if (location.pathname !== to) {
+  if (location.pathname + location.search !== to) {
     history.pushState({}, '', to);
-    routeSignal.value = parseLocation();
-  } else {
-    routeSignal.value = parseLocation(); // force re-render even when same
   }
+  routeSignal.value = parseLocation();
+  routeTickSignal.value++;
 }
-window.addEventListener('popstate', () => { routeSignal.value = parseLocation(); });
+window.addEventListener('popstate', () => {
+  routeSignal.value = parseLocation();
+  routeTickSignal.value++;
+});
 
 // Public marketplace paths — visible without login. Everything else
 // (cfg-sync /me/*, /admin/*, /show-token/*) requires a valid JWT.
@@ -173,6 +199,58 @@ async function call(method, path, body, opts = {}) {
 function isAuthFreePath(path) { return path.startsWith('/api/v1/auth/'); }
 function isIdempotent(m) { return m === 'GET' || m === 'DELETE' || m === 'PUT' || m === 'HEAD'; }
 
+// uploadMultipart POSTs a multipart/form-data body with a single "package"
+// field. Uses XMLHttpRequest because fetch() cannot expose per-write
+// progress on the upload side. onProgress receives a 0..1 ratio (null when
+// the server is processing after the upload finishes).
+//
+// Resolves with the parsed JSON body on 2xx, rejects with an Error decorated
+// with .status / .code / .body — same shape as call() so callers can use the
+// same ERR_MSGS lookup path.
+function uploadMultipart(path, file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', path);
+    const t = jwtSignal.value;
+    if (t) xhr.setRequestHeader('Authorization', `Bearer ${t}`);
+    if (onProgress) {
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) onProgress(e.loaded / e.total);
+      };
+      xhr.upload.onload = () => onProgress(null);  // server processing
+    }
+    xhr.onload = () => {
+      let data = null;
+      try { data = xhr.responseText ? JSON.parse(xhr.responseText) : null; } catch {}
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(data);
+        return;
+      }
+      const code = data?.error || `http_${xhr.status}`;
+      const err = new Error(ERR_MSGS[code] || code);
+      err.status = xhr.status;
+      err.code = code;
+      err.body = data;
+      reject(err);
+    };
+    xhr.onerror = () => {
+      const err = new Error('网络错误，上传失败');
+      err.status = 0;
+      err.code = 'network';
+      reject(err);
+    };
+    xhr.onabort = () => {
+      const err = new Error('已取消上传');
+      err.status = 0;
+      err.code = 'aborted';
+      reject(err);
+    };
+    const fd = new FormData();
+    fd.append('package', file);
+    xhr.send(fd);
+  });
+}
+
 // ============================================================
 // toasts
 // ============================================================
@@ -213,10 +291,13 @@ function logout() {
 // ============================================================
 function useApi(method, path, deps = []) {
   // Returns { data, err, loading, reload } for a single-shot GET.
+  // Subscribes to routeTickSignal so list pages refetch automatically
+  // when the user navigates back to them (see navigate()).
   const [data, setData] = useState(null);
   const [err, setErr] = useState(null);
   const [loading, setLoading] = useState(true);
   const [tick, setTick] = useState(0);
+  const routeTick = routeTickSignal.value;
   useEffect(() => {
     let alive = true;
     setLoading(true);
@@ -227,7 +308,7 @@ function useApi(method, path, deps = []) {
     );
     return () => { alive = false; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [method, path, ...deps, tick]);
+  }, [method, path, ...deps, tick, routeTick]);
   return { data, err, loading, reload: () => setTick(t => t + 1) };
 }
 
@@ -278,6 +359,10 @@ function App() {
       showToast('err', '需要管理员权限');
       navigate('/apps');
     }
+    if (jwt && segments[0] === 'dev' && !(user && user.is_admin)) {
+      showToast('err', '只有管理员可以发布应用');
+      navigate('/apps');
+    }
   }, [jwt, path, user]);
 
   // Close user menu on route change.
@@ -309,6 +394,14 @@ function renderRoute(path, segments) {
     return html`<${CatalogReleaseDetail} appId=${segments[1]} version=${decodeURIComponent(segments[3])} />`;
   if (segments[0] === 'apps' && segments[1])
     return html`<${CatalogAppDetail} appId=${segments[1]} />`;
+
+  // Developer release-management routes (admin only — NavDevLinks only
+  // shows for admins, and the backend endpoints are behind AdminMW).
+  if (path === '/dev/apps') return html`<${DevAppList} />`;
+  if (segments[0] === 'dev' && segments[1] === 'apps' && segments[2] && segments[3] === 'releases')
+    return html`<${DevReleaseList} appId=${segments[2]} />`;
+  if (segments[0] === 'dev' && segments[1] === 'apps' && segments[2] && segments[3] === 'new')
+    return html`<${DevUploadForm} appId=${segments[2]} />`;
 
   // Authenticated cfg-sync routes. Formerly /apps/* — relocated under
   // /me/apps/* to free the /apps namespace for the public marketplace.
@@ -368,6 +461,7 @@ function Nav() {
             <span>配额</span>
           </a>
           ${isAdmin ? html`<${NavAdminLinks} isActive=${isActive} />` : null}
+          ${isAdmin ? html`<${NavDevLinks} isActive=${isActive} />` : null}
           <span class="nav-divider"></span>
           <button ref=${ref} class="nav-user-btn"
                   onClick=${(e) => { e.stopPropagation(); menuOpenSignal.value = !menuOpen; }}
@@ -402,6 +496,17 @@ function NavAdminLinks({ isActive }) {
     <a class="nav-link ${isActive('/admin/users') ? 'active' : ''}"
        href="/admin/users"
        onClick=${(e) => { e.preventDefault(); navigate('/admin/users'); }}>用户管理</a>
+  `;
+}
+
+// NavDevLinks — admin-only entry to release management. Sibling of
+// NavAdminLinks, kept separate so htm doesn't have to parse
+// `${A && html\`...\`}` across complex children.
+function NavDevLinks({ isActive }) {
+  return html`
+    <a class="nav-link ${isActive('/dev/apps') ? 'active' : ''}"
+       href="/dev/apps"
+       onClick=${(e) => { e.preventDefault(); navigate('/dev/apps'); }}>我的发布</a>
   `;
 }
 
@@ -1098,7 +1203,7 @@ function AdminUsers() {
   const [offset, setOffset] = useState(0);
   const limit = 20;
   const path = `/api/v1/admin/users?limit=${limit}&offset=${offset}`;
-  const { data, err, loading } = useApi('GET', path, [offset]);
+  const { data, err, loading, reload } = useApi('GET', path, [offset]);
 
   if (err) return html`<${ErrorBox} err=${err} />`;
   if (loading) return html`<div class="loading-text">加载中…</div>`;
@@ -1113,13 +1218,7 @@ function AdminUsers() {
     try {
       await call('POST', `/api/v1/admin/users/${id}/promote`);
       showToast('ok', '已提升为管理员');
-      // Trigger reload by toggling offset (force useEffect re-run via dep).
-      setOffset((o) => o);
-      // No state change; force reload by incrementing via a tick. We just re-render.
-      // Simpler: navigate to same path forces reload via key trick — use a re-key
-      // by navigating to self with a query string. But simpler is to just reload
-      // via setting offset briefly.
-      setOffset((o) => o);
+      reload();
     } catch (e) { showToast('err', e.message); }
   };
 
@@ -1257,6 +1356,20 @@ function CatalogList() {
   const [q, setQ] = useState(initialQ);
   const [page, setPage] = useState(initialPage);
   const [searchInput, setSearchInput] = useState(initialQ);
+
+  // Sync state from URL whenever the route changes (user clicks a tag chip
+  // in CatalogHome or pagination elsewhere that navigates with ?tag=/ ?q=).
+  // Without this, useState initial* values would persist across same-path
+  // navigations and the filter UI would show stale state.
+  const routeSearch = routeSignal.value.search;
+  useEffect(() => {
+    const p = new URLSearchParams(routeSearch);
+    setTag(p.get('tag') || '');
+    setQ(p.get('q') || '');
+    setPage(parseInt(p.get('page') || '1', 10) || 1);
+    setSearchInput(p.get('q') || '');
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [routeSearch]);
 
   let query = `/api/v1/catalog/apps?page=${page}&size=20`;
   if (tag) query += `&tag=${encodeURIComponent(tag)}`;
@@ -1464,6 +1577,307 @@ function CatalogReleaseDetail({ appId, version }) {
     </div>
     <${CatalogDocSection} appId=${appId} version=${version} name="CHANGELOG.md" title="版本说明" defaultExpanded=${true} />
     <${CatalogDocSection} appId=${appId} version=${version} name="INSTALL.md" title="安装说明" />
+  `;
+}
+
+// ============================================================
+// Dev: release management (admin only)
+//
+// Routes (mirrors spec §11):
+//   /dev/apps                                  list apps owned/managed by admin
+//   /dev/apps/{app_id}/releases                release history + delete
+//   /dev/apps/{app_id}/new                     drag-drop .tar.gz upload + progress
+//
+// Single-admin mode (design decision 1): the same admin who registers app_id
+// is also the only publisher, so /dev/apps simply re-uses GET /admin/apps.
+// ============================================================
+
+// shortSha truncates a 64-char hex SHA to 12 chars for table display.
+function shortSha(s) { return s ? s.slice(0, 12) : '—'; }
+
+// formatValidationError turns an invalid_manifest response body into a
+// readable list. Server sends { error:"invalid_manifest", fields:[{path,msg}] }.
+function formatValidationError(body) {
+  if (!body) return null;
+  if (body.error !== 'invalid_manifest') return null;
+  const fields = body.fields || [];
+  if (fields.length === 0) return 'manifest.yaml 校验失败';
+  return html`<ul class="manifest-err-list">
+    ${fields.map((f) => html`<li><code>${f.path || 'manifest'}</code> — ${f.msg}</li>`)}
+  </ul>`;
+}
+
+function DevAppList() {
+  const { data, err, loading } = useApi('GET', '/api/v1/admin/apps');
+  if (err) return html`<${ErrorBox} err=${err} />`;
+  if (loading) return html`<div class="loading-text">加载中…</div>`;
+  const apps = data?.apps || [];
+  return html`
+    <nav class="breadcrumb">
+      <a href="/dev/apps" onClick=${(e) => { e.preventDefault(); navigate('/dev/apps'); }}>我的发布</a>
+    </nav>
+    <div class="page-header">
+      <div class="page-header-content">
+        <h1 class="page-title">我的发布</h1>
+        <p class="page-description">为已注册的 app 上传新版本、查看发布历史。</p>
+      </div>
+    </div>
+
+    ${apps.length === 0
+      ? html`
+        <div class="empty">
+          <div class="empty-icon">+</div>
+          <div class="empty-title">还没有可发布的 app</div>
+          <div class="empty-desc">先到「应用管理」注册一个 app_id，然后回到这里上传版本。</div>
+          <div class="empty-cta">
+            <button class="btn btn-primary" onClick=${() => navigate('/admin/apps')}>去注册 app</button>
+          </div>
+        </div>
+      `
+      : html`
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr><th>app_id</th><th>显示名</th><th>最新版本</th><th>创建时间</th><th></th></tr>
+            </thead>
+            <tbody>
+              ${apps.map((a) => html`
+                <tr key=${a.app_id}>
+                  <td><code>${a.app_id}</code></td>
+                  <td>${a.display_name}</td>
+                  <td>${a.latest_version ? html`<span class="badge">v${a.latest_version}</span>` : html`<span class="muted">—</span>`}</td>
+                  <td class="muted">${fmtTime(a.created_at)}</td>
+                  <td class="table-actions">
+                    <a class="btn btn-sm btn-primary" href=${'/dev/apps/' + a.app_id + '/new'}
+                       onClick=${(e) => { e.preventDefault(); navigate('/dev/apps/' + a.app_id + '/new'); }}>上传版本</a>
+                    <a class="btn btn-sm" href=${'/dev/apps/' + a.app_id + '/releases'}
+                       onClick=${(e) => { e.preventDefault(); navigate('/dev/apps/' + a.app_id + '/releases'); }}>发布历史</a>
+                  </td>
+                </tr>
+              `)}
+            </tbody>
+          </table>
+        </div>
+      `}
+  `;
+}
+
+function DevReleaseList({ appId }) {
+  const { data, err, loading, reload } = useApi('GET', `/api/v1/dev/apps/${appId}/releases`, [appId]);
+  const [busyVer, setBusyVer] = useState(null);
+  const [confirmVer, setConfirmVer] = useState(null);
+
+  const del = async (version) => {
+    setBusyVer(version); setConfirmVer(null);
+    try {
+      await call('DELETE', `/api/v1/dev/apps/${appId}/releases/${version}`);
+      showToast('ok', `已删除 v${version}`);
+      reload();
+    } catch (e) {
+      showToast('err', e.message);
+    } finally { setBusyVer(null); }
+  };
+
+  if (err) return html`<${ErrorBox} err=${err} />`;
+  if (loading) return html`<div class="loading-text">加载中…</div>`;
+  const releases = data?.releases || [];
+  return html`
+    <nav class="breadcrumb">
+      <a href="/dev/apps" onClick=${(e) => { e.preventDefault(); navigate('/dev/apps'); }}>我的发布</a>
+      <span class="breadcrumb-sep">/</span>
+      <span class="breadcrumb-current">${appId}</span>
+    </nav>
+    <div class="page-header">
+      <div class="page-header-content">
+        <h1 class="page-title">发布历史 <span class="muted" style="font-weight:normal">— ${appId}</span></h1>
+        <p class="page-description">已上传的所有版本，按 semver 倒序排列。删除操作不可恢复（但可重新上传）。</p>
+      </div>
+      <button class="btn btn-primary" onClick=${() => navigate('/dev/apps/' + appId + '/new')}>+ 上传新版本</button>
+    </div>
+
+    ${releases.length === 0
+      ? html`
+        <div class="empty">
+          <div class="empty-icon">○</div>
+          <div class="empty-title">还没有任何版本</div>
+          <div class="empty-desc">第一个版本将作为 latest_version。</div>
+          <div class="empty-cta">
+            <button class="btn btn-primary" onClick=${() => navigate('/dev/apps/' + appId + '/new')}>上传第一个版本</button>
+          </div>
+        </div>
+      `
+      : html`
+        <div class="table-wrap">
+          <table class="table">
+            <thead>
+              <tr><th>版本</th><th>大小</th><th>SHA256</th><th>发布时间</th><th>发布者</th><th></th></tr>
+            </thead>
+            <tbody>
+              ${releases.map((r) => html`
+                <tr key=${r.version}>
+                  <td><strong>v${r.version}</strong></td>
+                  <td>${humanBytes(r.package_size)}</td>
+                  <td><code class="mono-sm">${shortSha(r.package_sha256)}</code></td>
+                  <td class="muted">${fmtTime(r.created_at)}</td>
+                  <td class="muted">${r.created_by || '—'}</td>
+                  <td class="table-actions">
+                    ${confirmVer === r.version
+                      ? html`<button class="btn btn-sm btn-danger" disabled=${busyVer === r.version}
+                              onClick=${() => del(r.version)}>${busyVer === r.version ? '删除中…' : '确认删除'}</button>
+                          <button class="btn btn-sm" disabled=${busyVer === r.version}
+                              onClick=${() => setConfirmVer(null)}>取消</button>`
+                      : html`<a class="btn btn-sm" href="/apps/${appId}/v/${r.version}"
+                              onClick=${(e) => { e.preventDefault(); navigate('/apps/' + appId + '/v/' + r.version); }}>查看</a>
+                          <button class="btn btn-sm btn-danger" onClick=${() => setConfirmVer(r.version)}>删除</button>`
+                    }
+                  </td>
+                </tr>
+              `)}
+            </tbody>
+          </table>
+        </div>
+      `}
+  `;
+}
+
+// DevUploadForm — drag-drop .tar.gz + progress + error display.
+//
+// The actual upload goes through uploadMultipart (XHR) so we can show a
+// live progress bar. call() cannot do that — fetch() lacks per-write
+// progress on the request body.
+//
+// Error handling distinguishes:
+//   - network/aborted: show a generic notice
+//   - server side: use ERR_MSGS; if invalid_manifest, also render the
+//     field-level details returned by the server
+function DevUploadForm({ appId }) {
+  const [file, setFile] = useState(null);
+  const [dragOver, setDragOver] = useState(false);
+  // uploadPhase: 'idle' | 'uploading' | 'processing' (server churn after bytes received)
+  // 'uploading' is paired with progress 0..1; 'processing' shows a full bar with
+  // "服务器处理中…" because the server is unpacking / validating the tarball.
+  // Splitting these as two states avoids the previous bug where onProgress(null)
+  // collapsed both "idle" and "processing" into the same code path.
+  const [uploadPhase, setUploadPhase] = useState('idle');
+  const [progress, setProgress] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const inputRef = useRef(null);
+
+  const onPick = (f) => {
+    if (!f) return;
+    if (!/\.tar\.gz$/i.test(f.name) && f.type !== 'application/gzip') {
+      setErr(new Error('请选择 .tar.gz 文件'));
+      return;
+    }
+    setFile(f); setErr(null);
+  };
+
+  const submit = async () => {
+    if (!file) return;
+    setBusy(true); setErr(null); setProgress(0); setUploadPhase('uploading');
+    try {
+      await uploadMultipart(`/api/v1/dev/apps/${appId}/releases`, file, (ratio) => {
+        if (ratio === null) {
+          // upload.upload.onload fired — bytes are on the server, waiting for
+          // tar extraction + manifest validation + DB write.
+          setUploadPhase('processing');
+        } else {
+          setProgress(ratio);
+        }
+      });
+      showToast('ok', '上传成功');
+      navigate('/dev/apps/' + appId + '/releases');
+    } catch (e) {
+      setErr(e);
+      setUploadPhase('idle');
+    } finally { setBusy(false); }
+  };
+
+  const onDrop = (e) => {
+    e.preventDefault();
+    setDragOver(false);
+    const f = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (f) onPick(f);
+  };
+
+  const showProgress = uploadPhase !== 'idle';
+  const progressPct = uploadPhase === 'processing' ? 100 : Math.round(progress * 100);
+
+  return html`
+    <nav class="breadcrumb">
+      <a href="/dev/apps" onClick=${(e) => { e.preventDefault(); navigate('/dev/apps'); }}>我的发布</a>
+      <span class="breadcrumb-sep">/</span>
+      <a href=${'/dev/apps/' + appId + '/releases'}
+         onClick=${(e) => { e.preventDefault(); navigate('/dev/apps/' + appId + '/releases'); }}>${appId}</a>
+      <span class="breadcrumb-sep">/</span>
+      <span class="breadcrumb-current">上传新版本</span>
+    </nav>
+    <div class="page-header">
+      <div class="page-header-content">
+        <h1 class="page-title">上传新版本 <span class="muted" style="font-weight:normal">— ${appId}</span></h1>
+        <p class="page-description">拖入或选择 <code>.tar.gz</code> 压缩包。包内需含 <code>manifest.yaml</code> 和 <code>README.md</code>，可选 <code>icon.png</code> / <code>screenshots/</code> / <code>INSTALL.md</code> 等。</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class=${'dropzone' + (dragOver ? ' dropzone-active' : '')}
+           onDragOver=${(e) => { e.preventDefault(); setDragOver(true); }}
+           onDragLeave=${() => setDragOver(false)}
+           onDrop=${onDrop}
+           onClick=${() => inputRef.current && inputRef.current.click()}>
+        <input ref=${inputRef} type="file" accept=".tar.gz,application/gzip"
+               style="display:none"
+               onChange=${(e) => onPick(e.target.files && e.target.files[0])} />
+        ${file
+          ? html`<div class="dropzone-file">
+              <span class="dropzone-file-name">${file.name}</span>
+              <span class="muted">${humanBytes(file.size)}</span>
+            </div>`
+          : html`<div class="dropzone-hint">
+              <div class="dropzone-hint-icon">⤴</div>
+              <div>点击选择文件，或拖拽 <code>.tar.gz</code> 到这里</div>
+            </div>`}
+      </div>
+
+      ${showProgress ? html`
+        <div class="progress" style="margin-top:16px"
+             role="progressbar" aria-valuenow=${progressPct} aria-valuemin="0" aria-valuemax="100">
+          <div class="progress-bar" style=${{ width: progressPct + '%' }}></div>
+          <span class="progress-label">${uploadPhase === 'processing' ? '服务器处理中…' : progressPct + '%'}</span>
+        </div>
+      ` : null}
+
+      ${err ? html`
+        <div class="notice notice-danger" style="margin-top:16px">
+          <span class="notice-icon">!</span>
+          <div>
+            <div><strong>${err.message}</strong></div>
+            ${formatValidationError(err.body) || (err.body?.version ? html`<div class="muted" style="margin-top:4px">冲突版本：<code>v${err.body.version}</code></div>` : null)}
+          </div>
+        </div>
+      ` : null}
+
+      <div class="form-actions" style="margin-top:16px">
+        <button class="btn btn-primary" disabled=${!file || busy} onClick=${submit}>
+          ${busy ? '上传中…' : '开始上传'}
+        </button>
+        <a class="btn" href=${'/dev/apps/' + appId + '/releases'}
+           onClick=${(e) => { e.preventDefault(); navigate('/dev/apps/' + appId + '/releases'); }}>取消</a>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <h3 style="margin:0 0 8px">包结构要求</h3>
+      <ul class="hint-list">
+        <li><code>manifest.yaml</code> — 必需，schema_version=1，version 字段决定 release 版本号。</li>
+        <li><code>README.md</code> — 必需，最少一段简介。</li>
+        <li><code>INSTALL.md</code> / <code>USAGE.md</code> / <code>CHANGELOG.md</code> — 可选，前端按需展示。</li>
+        <li><code>icon.png</code> — 可选，建议 256×256。</li>
+        <li><code>screenshots/</code> — 可选截图目录，单图 ≤ 1 MB，总数 ≤ 8。</li>
+        <li><code>bin/...</code> 等可执行文件 — manifest.platforms.<i>os-arch</i>.path 指向。</li>
+      </ul>
+    </div>
   `;
 }
 

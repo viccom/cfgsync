@@ -172,6 +172,9 @@ func (r *Repo) Extract(stagingDir string) ([]string, error) {
 			return nil, fmt.Errorf("tar read: %w", err)
 		}
 		name := strings.TrimPrefix(hdr.Name, "./")
+		// Tar directory entries carry a trailing slash (e.g. "bin/") — strip
+		// it so sanitizeJoin doesn't reject the empty final segment.
+		name = strings.TrimSuffix(name, "/")
 		if name == "" || strings.HasPrefix(name, "/") {
 			continue
 		}

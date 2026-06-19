@@ -89,7 +89,7 @@ func AdminListApps(db *sql.DB) http.HandlerFunc {
 		}
 
 		rows, err := db.QueryContext(r.Context(),
-			`SELECT app_id, display_name, description, created_at, created_by
+			`SELECT app_id, display_name, description, created_at, created_by, latest_version
 			   FROM apps
 			  ORDER BY created_at DESC
 			  LIMIT ? OFFSET ?`, limit, offset)
@@ -102,7 +102,7 @@ func AdminListApps(db *sql.DB) http.HandlerFunc {
 		apps := make([]model.App, 0, limit)
 		for rows.Next() {
 			var a model.App
-			if err := rows.Scan(&a.AppID, &a.DisplayName, &a.Description, &a.CreatedAt, &a.CreatedBy); err != nil {
+			if err := rows.Scan(&a.AppID, &a.DisplayName, &a.Description, &a.CreatedAt, &a.CreatedBy, &a.LatestVersion); err != nil {
 				writeError(w, http.StatusInternalServerError, "internal")
 				return
 			}

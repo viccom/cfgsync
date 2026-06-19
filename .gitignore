@@ -22,3 +22,6 @@
 .DS_Store
 Thumbs.db
 .worktrees/
+
+# Playwright MCP tool artifacts (local screenshots/snapshots/console logs)
+.playwright-mcp/

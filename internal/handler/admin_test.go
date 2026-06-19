@@ -158,6 +158,14 @@ func TestAdminListApps_ReturnsAllWithCreatedBy(t *testing.T) {
 	adminUID := env.seedUser(t, "admin@example.com", "p12345678", true)
 	env.seedApp(t, "com.foo", "Foo", adminUID)
 	env.seedApp(t, "com.bar", "Bar", adminUID)
+	// com.foo has a published release; com.bar does not. AdminListApps must
+	// surface latest_version so the dev dashboard can show the badge without
+	// a separate /api/v1/catalog query (which would miss private/unlisted apps).
+	if _, err := env.db.Exec(
+		`UPDATE apps SET latest_version = '1.2.3' WHERE app_id = 'com.foo'`,
+	); err != nil {
+		t.Fatalf("seed latest: %v", err)
+	}
 	tok := env.userToken(adminUID, "admin@example.com", true)
 
 	h := adminChain(env, AdminListApps(env.db))
@@ -175,6 +183,10 @@ func TestAdminListApps_ReturnsAllWithCreatedBy(t *testing.T) {
 	// Admin view must include created_by (user_id).
 	if !strings.Contains(body, `"created_by":"`+adminUID+`"`) {
 		t.Errorf("expected created_by=%s in %s", adminUID, body)
+	}
+	// latest_version must be present for com.foo, absent for com.bar.
+	if !strings.Contains(body, `"latest_version":"1.2.3"`) {
+		t.Errorf("expected latest_version=1.2.3 for com.foo in %s", body)
 	}
 }
 
