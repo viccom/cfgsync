@@ -26,6 +26,32 @@ import (
 // the caller-supplied limit.
 var ErrPackageTooLarge = errors.New("repo: package too large")
 
+// ErrExtractLimitExceeded is returned by Extract when the tar.gz contents
+// exceed the per-file size, total file count, or total extracted byte cap.
+// All three guards are needed because a malicious tar can declare huge
+// sparse headers, many small entries, or use gzip compression bombs.
+var ErrExtractLimitExceeded = errors.New("repo: extracted contents exceed safety cap")
+
+// Extract safety caps. Chosen to comfortably accommodate legitimate app
+// packages (cf. typical Electron app 100-300 MB unpacked) while preventing
+// the most common tar abuse patterns: zip bombs, million-entry tables,
+// and oversized individual binaries.
+const (
+	// MaxExtractedPerFile caps a single extracted file. 256 MB is large
+	// enough for any plausible single binary but stops a "10 GB asset"
+	// attack.
+	MaxExtractedPerFile = 256 << 20
+	// MaxExtractedFileCount caps total entries. 5000 is far beyond any
+	// legitimate app package (typical: 10-200 entries) but stops the
+	// "million tiny files" inode-exhaustion attack.
+	MaxExtractedFileCount = 5000
+	// MaxExtractedTotalBytes caps the sum of all extracted file sizes.
+	// 2 GB is well above a typical app package while still bounding disk
+	// usage against gzip compression bombs (a 200 MB input can decompress
+	// to tens of GB without this guard).
+	MaxExtractedTotalBytes = 2 << 30
+)
+
 // Repo is the file-system store for uploaded packages.
 type Repo struct {
 	root string
@@ -53,17 +79,21 @@ type StageResult struct {
 }
 
 // Stage streams an uploaded tar.gz into a staging directory:
-//   {root}/_staging/{app_id}/{version}/package.tar.gz
-//   {root}/_staging/{app_id}/{version}/package.sha256
+//
+//	{root}/_staging/{app_id}/{uploadID}/package.tar.gz
+//	{root}/_staging/{app_id}/{uploadID}/package.sha256
+//
+// where {uploadID} is a caller-supplied unique token (auth.NewID()) so two
+// concurrent uploads for different versions of the same app do not collide.
 // Caller validates the manifest, then Promote()s the staging directory to
 // its final location. On any failure caller must Discard(stagingDir).
 //
-// At entry, Stage wipes the entire {root}/_staging/{app_id}/ subtree so a
-// previously failed upload for the same app (regardless of version) does
-// not leak into the new attempt.
-func (r *Repo) Stage(appID, version string, body io.Reader, maxBytes int64) (StageResult, error) {
-	staging := r.stagingPath(appID, version)
-	_ = os.RemoveAll(filepath.Dir(staging))
+// At entry, Stage wipes the entire staging subtree for this {uploadID} so a
+// previously failed retry does not leak into the new attempt. It deliberately
+// does NOT touch sibling {uploadID} directories of the same app.
+func (r *Repo) Stage(appID, uploadID string, body io.Reader, maxBytes int64) (StageResult, error) {
+	staging := r.stagingPath(appID, uploadID)
+	_ = os.RemoveAll(staging)
 	if err := os.MkdirAll(staging, 0o700); err != nil {
 		return StageResult{}, fmt.Errorf("mkdir staging: %w", err)
 	}
@@ -106,6 +136,11 @@ func (r *Repo) Stage(appID, version string, body io.Reader, maxBytes int64) (Sta
 // Symlinks, device nodes, fifos and other non-regular entries are silently
 // skipped — release packages should never carry them, and dropping them
 // avoids whole categories of zip-slip / symlink-escape attacks.
+//
+// Three safety caps protect against malicious tar.gz payloads (see
+// MaxExtractedPerFile / MaxExtractedFileCount / MaxExtractedTotalBytes).
+// Exceeding any cap returns ErrExtractLimitExceeded and the caller must
+// Discard the staging dir.
 func (r *Repo) Extract(stagingDir string) ([]string, error) {
 	pkgPath := filepath.Join(stagingDir, "package.tar.gz")
 	extractedRoot := filepath.Join(stagingDir, "extracted")
@@ -126,6 +161,8 @@ func (r *Repo) Extract(stagingDir string) ([]string, error) {
 	tr := tar.NewReader(gz)
 
 	var paths []string
+	var totalBytes int64
+	fileCount := 0
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -148,6 +185,22 @@ func (r *Repo) Extract(stagingDir string) ([]string, error) {
 				return nil, err
 			}
 		case tar.TypeReg:
+			// Per-file size cap. hdr.Size is the declared entry size; the
+			// underlying tar.Reader will return io.ErrUnexpectedEOF if the
+			// stream is shorter, so trusting hdr.Size here is safe.
+			if hdr.Size > MaxExtractedPerFile {
+				return nil, fmt.Errorf("%w: file %q declared %d bytes (max %d)",
+					ErrExtractLimitExceeded, hdr.Name, hdr.Size, MaxExtractedPerFile)
+			}
+			if totalBytes+hdr.Size > MaxExtractedTotalBytes {
+				return nil, fmt.Errorf("%w: total extracted bytes would exceed %d",
+					ErrExtractLimitExceeded, MaxExtractedTotalBytes)
+			}
+			fileCount++
+			if fileCount > MaxExtractedFileCount {
+				return nil, fmt.Errorf("%w: file count exceeds %d",
+					ErrExtractLimitExceeded, MaxExtractedFileCount)
+			}
 			if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
 				return nil, err
 			}
@@ -155,11 +208,19 @@ func (r *Repo) Extract(stagingDir string) ([]string, error) {
 			if err != nil {
 				return nil, err
 			}
-			if _, err := io.Copy(of, tr); err != nil {
-				of.Close()
+			// Cap the actual copy as a defense-in-depth: even if hdr.Size
+			// is bounded, a maliciously crafted tar with a corrupt size
+			// field could otherwise stream unbounded data through tr.
+			n, err := io.Copy(of, io.LimitReader(tr, MaxExtractedPerFile+1))
+			of.Close()
+			if err != nil {
 				return nil, err
 			}
-			of.Close()
+			if n > MaxExtractedPerFile {
+				return nil, fmt.Errorf("%w: file %q exceeded %d bytes on disk",
+					ErrExtractLimitExceeded, hdr.Name, MaxExtractedPerFile)
+			}
+			totalBytes += n
 			rel, _ := filepath.Rel(extractedRoot, target)
 			paths = append(paths, filepath.ToSlash(rel))
 		}
@@ -169,7 +230,9 @@ func (r *Repo) Extract(stagingDir string) ([]string, error) {
 
 // Promote atomically (on POSIX; best-effort on Windows) moves the staging
 // directory to its final location:
-//   {root}/{app_id}/{version}/
+//
+//	{root}/{app_id}/{version}/
+//
 // If the destination already exists (overwrite), it's renamed to {final}.old
 // first and deleted after the staging→final rename succeeds. A crash between
 // the two renames leaves {final}.old behind; the next Promote cleans it up.
@@ -248,7 +311,9 @@ type PackageInfo struct {
 }
 
 // PackageInfo reads the staged / promoted package's path, sha256 (from the
-// sidecar), and size. Returns os.ErrNotExist if the release dir is absent.
+// sidecar), and size. Returns os.ErrNotExist if the release dir or any of
+// the canonical files is absent. A missing sidecar is treated as corruption
+// — dev handler writes both atomically, so absence means data loss.
 func (r *Repo) PackageInfo(appID, version string) (PackageInfo, error) {
 	final := r.releasePath(appID, version)
 	pkgPath := filepath.Join(final, "package.tar.gz")
@@ -256,7 +321,10 @@ func (r *Repo) PackageInfo(appID, version string) (PackageInfo, error) {
 	if err != nil {
 		return PackageInfo{}, err
 	}
-	shaHex, _ := os.ReadFile(filepath.Join(final, "package.sha256"))
+	shaHex, err := os.ReadFile(filepath.Join(final, "package.sha256"))
+	if err != nil {
+		return PackageInfo{}, fmt.Errorf("read sha256 sidecar for %s/%s: %w", appID, version, err)
+	}
 	return PackageInfo{
 		Path:   pkgPath,
 		Size:   stat.Size(),
@@ -270,11 +338,11 @@ func (r *Repo) PackageInfo(appID, version string) (PackageInfo, error) {
 func (r *Repo) ListExtracted(appID, version string) ([]string, error) {
 	extractedRoot := filepath.Join(r.releasePath(appID, version), "extracted")
 	var out []string
-	err := filepath.Walk(extractedRoot, func(p string, info os.FileInfo, err error) error {
+	err := filepath.WalkDir(extractedRoot, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if info.IsDir() {
+		if d.IsDir() {
 			return nil
 		}
 		rel, _ := filepath.Rel(extractedRoot, p)
@@ -284,8 +352,8 @@ func (r *Repo) ListExtracted(appID, version string) ([]string, error) {
 	return out, err
 }
 
-func (r *Repo) stagingPath(appID, version string) string {
-	return filepath.Join(r.root, "_staging", appID, version)
+func (r *Repo) stagingPath(appID, uploadID string) string {
+	return filepath.Join(r.root, "_staging", appID, uploadID)
 }
 
 func (r *Repo) releasePath(appID, version string) string {
@@ -310,7 +378,7 @@ func sanitizeJoin(root, rel string) (string, error) {
 	if strings.HasPrefix(rel, "/") {
 		return "", fmt.Errorf("absolute path")
 	}
-	for _, seg := range strings.Split(rel, "/") {
+	for seg := range strings.SplitSeq(rel, "/") {
 		if seg == "" || seg == "." || seg == ".." {
 			return "", fmt.Errorf("invalid segment %q in %q", seg, rel)
 		}

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -474,5 +475,193 @@ func seedReleaseRow(t *testing.T, env *testEnv, appID, version, adminUID string)
 	)
 	if err != nil {
 		t.Fatalf("seed release row: %v", err)
+	}
+}
+
+// TestUploadRelease_ConcurrentPOSTSameVersion_AllConflictsAre409 covers the
+// race where two clients race the same (app_id, version). With
+// SetMaxOpenConns(1) the SELECTs serialize, but a client that SELECTs
+// before another tx commits still hits the UNIQUE constraint on INSERT.
+// All non-success responses must be 409 (never 500 "internal").
+func TestUploadRelease_ConcurrentPOSTSameVersion_AllConflictsAre409(t *testing.T) {
+	env := newTestEnv(t)
+	adminUID := env.seedUser(t, "admin@example.com", "p12345678", true)
+	env.seedApp(t, "com.foo", "Foo", adminUID)
+	tok := env.userToken(adminUID, "admin@example.com", true)
+
+	h := adminChain(env, UploadRelease(env.db, env.cfg, env.repo))
+
+	const N = 8
+	var wg sync.WaitGroup
+	codes := make([]int, N)
+	start := make(chan struct{})
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-start
+			w := uploadReq(t, h, "POST", "/api/v1/dev/apps/com.foo/releases",
+				"com.foo", "", tok, validPkg(t, ""))
+			codes[idx] = w.Code
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	var ok, conflict, other int
+	otherCodes := []int{}
+	for _, c := range codes {
+		switch c {
+		case http.StatusOK:
+			ok++
+		case http.StatusConflict:
+			conflict++
+		default:
+			other++
+			otherCodes = append(otherCodes, c)
+		}
+	}
+	if ok != 1 {
+		t.Errorf("expected exactly 1 success, got %d (codes=%v)", ok, codes)
+	}
+	if other > 0 {
+		t.Errorf("expected all failures to be 409, got %d other=%v (codes=%v)", other, otherCodes, codes)
+	}
+	if conflict != N-1 {
+		t.Errorf("expected %d conflicts, got %d (codes=%v)", N-1, conflict, codes)
+	}
+}
+
+// TestUploadRelease_ConcurrentPOSTDifferentVersions_AllSucceed covers H2:
+// before the staging isolation fix, every Stage wiped the parent
+// _staging/{app_id}/ dir, so two concurrent uploads for different versions
+// of the same app would clobber each other. Now each upload uses a unique
+// uploadID so siblings are untouched.
+func TestUploadRelease_ConcurrentPOSTDifferentVersions_AllSucceed(t *testing.T) {
+	env := newTestEnv(t)
+	adminUID := env.seedUser(t, "admin@example.com", "p12345678", true)
+	env.seedApp(t, "com.foo", "Foo", adminUID)
+	tok := env.userToken(adminUID, "admin@example.com", true)
+
+	h := adminChain(env, UploadRelease(env.db, env.cfg, env.repo))
+
+	versions := []string{"1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0"}
+	codes := make([]int, len(versions))
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i, v := range versions {
+		wg.Add(1)
+		go func(idx int, version string) {
+			defer wg.Done()
+			<-start
+			w := uploadReq(t, h, "POST", "/api/v1/dev/apps/com.foo/releases",
+				"com.foo", "", tok, validPkg(t, version))
+			codes[idx] = w.Code
+		}(i, v)
+	}
+	close(start)
+	wg.Wait()
+
+	for i, c := range codes {
+		if c != http.StatusOK {
+			t.Errorf("upload %s: expected 200, got %d (all codes=%v)", versions[i], c, codes)
+		}
+	}
+	// Each version's release directory must exist in the repo (no clobber).
+	for _, v := range versions {
+		if !env.repo.ReleaseExists("com.foo", v) {
+			t.Errorf("release %s missing after concurrent upload", v)
+		}
+	}
+}
+
+// lexical ASC would order "rc.1" < "rc.11" < "rc.2", but semver §11 says
+// rc.11 > rc.2 > rc.1. Verifies Go-layer sort via sortReleasesBySemverDesc.
+func TestListDevReleases_PrereleaseOrdering(t *testing.T) {
+	env := newTestEnv(t)
+	adminUID := env.seedUser(t, "admin@example.com", "p12345678", true)
+	env.seedApp(t, "com.foo", "Foo", adminUID)
+	tok := env.userToken(adminUID, "admin@example.com", true)
+
+	post := adminChain(env, UploadRelease(env.db, env.cfg, env.repo))
+	versions := []string{"1.0.0-rc.1", "1.0.0-rc.2", "1.0.0-rc.11", "1.0.0"}
+	for _, v := range versions {
+		if w := uploadReq(t, post, "POST", "/api/v1/dev/apps/com.foo/releases",
+			"com.foo", "", tok, validPkg(t, v)); w.Code != http.StatusOK {
+			t.Fatalf("seed %s: %d %s", v, w.Code, w.Body.String())
+		}
+	}
+
+	h := adminChain(env, ListDevReleases(env.db))
+	req := httptest.NewRequest("GET", "/api/v1/dev/apps/com.foo/releases", &bytes.Buffer{})
+	req.SetPathValue("app_id", "com.foo")
+	req.Header.Set("Authorization", "Bearer "+tok)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Releases []struct {
+			Version string `json:"version"`
+		} `json:"releases"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	got := make([]string, len(resp.Releases))
+	for i, r := range resp.Releases {
+		got[i] = r.Version
+	}
+	// semver precedence (newest first): 1.0.0 > 1.0.0-rc.11 > 1.0.0-rc.2 > 1.0.0-rc.1
+	want := []string{"1.0.0", "1.0.0-rc.11", "1.0.0-rc.2", "1.0.0-rc.1"}
+	if len(got) != len(want) {
+		t.Fatalf("expected %d releases, got %d (%+v)", len(want), len(got), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("position %d: got %s, want %s (full: %+v)", i, got[i], want[i], got)
+		}
+	}
+}
+
+// TestDeleteRelease_PrereleaseLatestRecompute verifies that deleting the
+// latest prerelease picks the next-highest prerelease by semver precedence,
+// not the lexically-smallest pre string.
+func TestDeleteRelease_PrereleaseLatestRecompute(t *testing.T) {
+	env := newTestEnv(t)
+	adminUID := env.seedUser(t, "admin@example.com", "p12345678", true)
+	env.seedApp(t, "com.foo", "Foo", adminUID)
+	tok := env.userToken(adminUID, "admin@example.com", true)
+
+	post := adminChain(env, UploadRelease(env.db, env.cfg, env.repo))
+	uploadReq(t, post, "POST", "/api/v1/dev/apps/com.foo/releases",
+		"com.foo", "", tok, validPkg(t, "1.0.0-rc.1"))
+	uploadReq(t, post, "POST", "/api/v1/dev/apps/com.foo/releases",
+		"com.foo", "", tok, validPkg(t, "1.0.0-rc.2"))
+	uploadReq(t, post, "POST", "/api/v1/dev/apps/com.foo/releases",
+		"com.foo", "", tok, validPkg(t, "1.0.0-rc.11"))
+
+	// apps.latest_version should be rc.11 (highest prerelease).
+	var latest string
+	env.db.QueryRow(`SELECT latest_version FROM apps WHERE app_id='com.foo'`).Scan(&latest)
+	if latest != "1.0.0-rc.11" {
+		t.Fatalf("latest after upload = %q, want 1.0.0-rc.11", latest)
+	}
+
+	// Delete rc.11 → latest must fall to rc.2 (not rc.1, not lexically smallest).
+	del := adminChain(env, DeleteRelease(env.db, env.repo))
+	req := httptest.NewRequest("DELETE", "/api/v1/dev/apps/com.foo/releases/1.0.0-rc.11", &bytes.Buffer{})
+	req.SetPathValue("app_id", "com.foo")
+	req.SetPathValue("version", "1.0.0-rc.11")
+	req.Header.Set("Authorization", "Bearer "+tok)
+	w := httptest.NewRecorder()
+	del.ServeHTTP(w, req)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("delete: %d %s", w.Code, w.Body.String())
+	}
+	env.db.QueryRow(`SELECT latest_version FROM apps WHERE app_id='com.foo'`).Scan(&latest)
+	if latest != "1.0.0-rc.2" {
+		t.Errorf("latest after delete rc.11 = %q, want 1.0.0-rc.2", latest)
 	}
 }

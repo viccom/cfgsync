@@ -129,6 +129,12 @@ CREATE TABLE IF NOT EXISTS app_releases (
     assets_json     TEXT NOT NULL DEFAULT '[]',
     release_notes   TEXT NOT NULL DEFAULT '',
     created_at      INTEGER NOT NULL,
+    -- created_by is NOT NULL because every release is published by an
+    -- authenticated admin (auth.UserID from the JWT). FK has no ON DELETE
+    -- clause: cfgsync has no admin-deletion API today. If one is added,
+    -- the right action is RESTRICT (force the operator to reassign or
+    -- delete the releases first) — never CASCADE, which would silently
+    -- erase published artifacts.
     created_by      TEXT NOT NULL REFERENCES users(id),
     UNIQUE(app_id, version)
 );

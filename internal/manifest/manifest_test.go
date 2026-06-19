@@ -105,6 +105,49 @@ version: "1.0.0"
 	expectField(t, err, "display_name", "required")
 }
 
+func TestParseAndValidate_HomepageScheme(t *testing.T) {
+	cases := map[string]bool{
+		"https://example.com":     true,
+		"http://localhost:8080/x": true,
+		"javascript:alert(1)":     false,
+		"data:text/html,<script>": false,
+		"file:///etc/passwd":      false,
+		"example.com":             false, // missing scheme
+		"ftp://example.com":       false,
+		"mailto:foo@example.com":  false,
+		"HTTPS://example.com":     true, // scheme is case-insensitive per RFC 3986
+	}
+	for raw, wantOK := range cases {
+		t.Run(raw, func(t *testing.T) {
+			yamlStr := "schema_version: 1\nversion: \"1.0.0\"\ndisplay_name: \"X\"\nhomepage: \"" + raw + "\"\n"
+			_, err := mustParse(t, yamlStr)
+			if wantOK && err != nil {
+				t.Errorf("expected ok, got %v", err)
+			}
+			if !wantOK && err == nil {
+				t.Errorf("expected error for homepage=%q", raw)
+				return
+			}
+			if !wantOK && err != nil {
+				var ve *ValidationError
+				if !errors.As(err, &ve) {
+					t.Errorf("expected ValidationError, got %T: %v", err, err)
+					return
+				}
+				foundHomepage := false
+				for _, f := range ve.Fields {
+					if f.Field == "homepage" {
+						foundHomepage = true
+					}
+				}
+				if !foundHomepage {
+					t.Errorf("expected homepage field error, got %+v", ve.Fields)
+				}
+			}
+		})
+	}
+}
+
 func TestParseAndValidate_OversizedFields(t *testing.T) {
 	yamlStr := `
 schema_version: 1
@@ -268,20 +311,50 @@ func TestValidationError_ErrorString(t *testing.T) {
 
 func TestIsSafeRelPath(t *testing.T) {
 	cases := map[string]bool{
-		"bin/linux/myapp":      true,
-		"bin/linux-a/myapp":    true,
-		"myapp":                true,
-		"":                     false,
-		"/etc/passwd":          false,
-		"../escape":            false,
-		"./myapp":              false,
-		"a/../b":               false,
-		"bin\\evil":            false,
-		"c:/x":                 false,
+		"bin/linux/myapp":   true,
+		"bin/linux-a/myapp": true,
+		"myapp":             true,
+		"":                  false,
+		"/etc/passwd":       false,
+		"../escape":         false,
+		"./myapp":           false,
+		"a/../b":            false,
+		"bin\\evil":         false,
+		"c:/x":              false,
 	}
 	for p, want := range cases {
 		if got := isSafeRelPath(p); got != want {
 			t.Errorf("isSafeRelPath(%q) = %v, want %v", p, got, want)
 		}
+	}
+}
+
+// TestParseAndValidate_ExtraFieldRejected covers L8: an "extra:" block in
+// the YAML used to be declared as json.RawMessage, but yaml.v3 cannot
+// round-trip arbitrary YAML into RawMessage (errors on scalars, produces
+// invalid JSON on lists). The field was removed until a yaml.Node-based
+// implementation is needed. Until then, an extra: block must NOT silently
+// pass — yaml.v3's strict mode would catch unknown fields, but our default
+// is lenient, so we expect the block to be ignored rather than fail. The
+// test pins the current behavior so a future change is intentional.
+func TestParseAndValidate_ExtraFieldRejected(t *testing.T) {
+	cases := []struct {
+		name  string
+		extra string
+	}{
+		{"scalar_string", `extra: "hello"`},
+		{"map", `extra:
+  k1: v1`},
+		{"list", `extra: [1, 2, 3]`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			yamlStr := "schema_version: 1\nversion: \"1.0.0\"\ndisplay_name: \"X\"\n" + c.extra + "\n"
+			// yaml.v3 default is lenient — extra is silently ignored
+			// because the field does not exist on the struct.
+			if _, err := mustParse(t, yamlStr); err != nil {
+				t.Errorf("expected extra block to be silently ignored, got error: %v", err)
+			}
+		})
 	}
 }

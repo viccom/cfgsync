@@ -38,7 +38,7 @@ func TestParse_Invalid(t *testing.T) {
 		"1",
 		"1.0",
 		"1.0.0.0",
-		"01.0.0", // leading zeros rejected by semver
+		"01.0.0",      // leading zeros rejected by semver
 		"1.0.0+build", // build metadata rejected by cfgsync policy
 		"1.0.0-",
 		"v",

@@ -5,12 +5,12 @@ type App struct {
 	AppID          string   `json:"app_id"`
 	DisplayName    string   `json:"display_name"`
 	Description    string   `json:"description"`
-	Summary        string   `json:"summary,omitempty"`          // v3: card summary
-	OwnerUserID    string   `json:"owner_user_id,omitempty"`    // v3: app owner (admin who published)
-	Visibility     string   `json:"visibility,omitempty"`       // v3: public|unlisted|private
-	IconPath       string   `json:"icon_path,omitempty"`        // v3: repo-relative icon path
-	LatestVersion  string   `json:"latest_version,omitempty"`   // v3: cached latest release version
-	Tags           []string `json:"tags,omitempty"`             // v3: multi-tag labels
+	Summary        string   `json:"summary,omitempty"`        // v3: card summary
+	OwnerUserID    string   `json:"owner_user_id,omitempty"`  // v3: app owner (admin who published)
+	Visibility     string   `json:"visibility,omitempty"`     // v3: public|unlisted|private
+	IconPath       string   `json:"icon_path,omitempty"`      // v3: repo-relative icon path
+	LatestVersion  string   `json:"latest_version,omitempty"` // v3: cached latest release version
+	Tags           []string `json:"tags,omitempty"`           // v3: multi-tag labels
 	CreatedAt      int64    `json:"created_at"`
 	CreatedBy      string   `json:"created_by"`                 // user_id of the admin who registered
 	CreatedByEmail string   `json:"created_by_email,omitempty"` // only populated in admin views

@@ -101,15 +101,66 @@ var migrationSteps = map[int]func(*sql.DB) error{
 func applyV1(d *sql.DB) error { return nil }
 func applyV2(d *sql.DB) error { return nil }
 
-// applyV3: current schema (app market module). Re-applies schema.sql, which
-// is idempotent. NOTE: this is NOT a supported v2 → v3 in-place upgrade —
-// v3 adds new columns to apps (visibility, summary, icon_path,
-// latest_version, updated_at) which CREATE TABLE IF NOT EXISTS will not add
-// to an already-existing apps table. Fresh DB required; documented in
+// applyV3: current schema (app market module). Probes the apps table for
+// the v3 column set BEFORE running schema.sql so a v2-era DB fails with an
+// actionable error message instead of crashing mid-migration on
+// CREATE INDEX idx_apps_visibility. After schema.sql runs, the probe runs
+// again to catch the case where a future edit to schema.sql accidentally
+// drops a column while leaving CREATE TABLE IF NOT EXISTS as a no-op.
+//
+// v2 → v3 in-place upgrade is intentionally unsupported; operators must
+// delete the DB and restart. See
 // docs/superpowers/specs/2026-06-18-app-market-design.md §2 decision 8.
 func applyV3(d *sql.DB) error {
+	if err := assertAppsHasV3ColumnsOrAbsent(d); err != nil {
+		return err
+	}
 	if _, err := d.Exec(schemaSQL); err != nil {
 		return fmt.Errorf("apply schema.sql: %w", err)
+	}
+	if err := assertAppsHasV3ColumnsOrAbsent(d); err != nil {
+		return fmt.Errorf("post-schema probe: %w", err)
+	}
+	return nil
+}
+
+// v3ColumnsAddedBySchema is the set of apps columns schema.sql adds beyond
+// the v2 baseline. assertAppsHasV3ColumnsOrAbsent uses this to detect a
+// v2-era apps table that schema.sql's CREATE TABLE IF NOT EXISTS would
+// silently leave untouched.
+var v3ColumnsAddedBySchema = []string{
+	"visibility", "summary", "icon_path", "latest_version", "updated_at",
+	"owner_user_id",
+}
+
+func assertAppsHasV3ColumnsOrAbsent(d *sql.DB) error {
+	var appsExists int
+	err := d.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'apps'`,
+	).Scan(&appsExists)
+	if err != nil {
+		return fmt.Errorf("probe apps existence: %w", err)
+	}
+	if appsExists == 0 {
+		return nil // fresh DB — schema.sql will create apps with v3 columns
+	}
+	for _, col := range v3ColumnsAddedBySchema {
+		var n int
+		err := d.QueryRow(
+			`SELECT COUNT(*) FROM pragma_table_info('apps') WHERE name = ?`,
+			col,
+		).Scan(&n)
+		if err != nil {
+			return fmt.Errorf("probe apps.%s: %w", col, err)
+		}
+		if n == 0 {
+			return fmt.Errorf(
+				"apps table is missing column %q — "+
+					"v2 → v3 in-place upgrade is not supported; delete the DB file and restart "+
+					"(see docs/superpowers/specs/2026-06-18-app-market-design.md §2 decision 8)",
+				col,
+			)
+		}
 	}
 	return nil
 }

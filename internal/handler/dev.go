@@ -18,16 +18,17 @@ import (
 	"github.com/viccom/cfgsync/internal/config"
 	"github.com/viccom/cfgsync/internal/manifest"
 	"github.com/viccom/cfgsync/internal/repo"
+	"github.com/viccom/cfgsync/internal/semver"
 )
 
 // Canonical document filenames inside the package root. Spec §4.1.
 const (
-	docReadme            = "README.md"
-	docInstall           = "INSTALL.md"
-	docUsage             = "USAGE.md"
-	docChangelog         = "CHANGELOG.md"
-	assetIcon            = "icon.png"
-	assetScreenshotsDir  = "screenshots"
+	docReadme           = "README.md"
+	docInstall          = "INSTALL.md"
+	docUsage            = "USAGE.md"
+	docChangelog        = "CHANGELOG.md"
+	assetIcon           = "icon.png"
+	assetScreenshotsDir = "screenshots"
 )
 
 // UploadRelease handles POST /api/v1/dev/apps/{app_id}/releases. Reads a
@@ -79,7 +80,12 @@ func processUpload(db *sql.DB, cfg *config.Config, repository *repo.Repo, allowO
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		stage, err := repository.Stage(appID, "_pending", part, cfg.MaxPackageBytes)
+		// uploadID is unique per HTTP request so concurrent uploads to the
+		// same app_id do not collide in the staging tree. Each Stage call
+		// wipes its own _staging/{app_id}/{uploadID}/ subtree, never the
+		// sibling directories of in-flight concurrent uploads.
+		uploadID := auth.NewID()
+		stage, err := repository.Stage(appID, uploadID, part, cfg.MaxPackageBytes)
 		if err != nil {
 			if errors.Is(err, repo.ErrPackageTooLarge) {
 				writeJSON(w, http.StatusRequestEntityTooLarge, map[string]interface{}{
@@ -100,64 +106,17 @@ func processUpload(db *sql.DB, cfg *config.Config, repository *repo.Repo, allowO
 			return
 		}
 
-		// 4. Read + parse manifest.yaml.
-		if !containsFile(files, "manifest.yaml") {
-			repository.Discard(stage.StagingDir)
-			writeError(w, http.StatusBadRequest, "manifest_required")
+		// 4-7. Validate manifest, enforce README, collect docs + assets.
+		// Each failure path inside parseStagedPackage writes the matching
+		// HTTP response (400 invalid_manifest / readme_required /
+		// version_mismatch / doc_too_large / etc.) and Discards the staging
+		// dir so processUpload only has to handle the success path.
+		parsed, ok := parseStagedPackage(w, repository, stage.StagingDir, files, cfg, urlVersion)
+		if !ok {
 			return
 		}
-		manifestBytes, err := readCappedFile(filepath.Join(stage.StagingDir, "extracted", "manifest.yaml"), cfg.MaxManifestBytes)
-		if err != nil {
-			repository.Discard(stage.StagingDir)
-			writeError(w, http.StatusBadRequest, "manifest_too_large")
-			return
-		}
-		mf, ver, err := manifest.ParseAndValidate(manifestBytes)
-		if err != nil {
-			repository.Discard(stage.StagingDir)
-			var ve *manifest.ValidationError
-			if errors.As(err, &ve) {
-				writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-					"error":  "invalid_manifest",
-					"fields": ve.Fields,
-				})
-				return
-			}
-			writeError(w, http.StatusBadRequest, "invalid_manifest")
-			return
-		}
-
-		// 5. URL version (PUT) must match manifest version.
-		if urlVersion != "" && urlVersion != mf.Version {
-			repository.Discard(stage.StagingDir)
-			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-				"error":    "version_mismatch",
-				"url":      urlVersion,
-				"manifest": mf.Version,
-			})
-			return
-		}
-
-		// 6. README.md required.
-		if !containsFile(files, docReadme) {
-			repository.Discard(stage.StagingDir)
-			writeError(w, http.StatusBadRequest, "readme_required")
-			return
-		}
-
-		// 7. Collect docs and assets (each capped per spec §4.2).
-		docs, err := collectDocs(stage.StagingDir, files, cfg)
-		if err != nil {
-			repository.Discard(stage.StagingDir)
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
-		assets, err := collectAssets(stage.StagingDir, files, cfg)
-		if err != nil {
-			repository.Discard(stage.StagingDir)
-			writeError(w, http.StatusBadRequest, err.Error())
-			return
-		}
+		mf := parsed.mf
+		ver := parsed.ver
 
 		// 8. Existing release check.
 		var existingID int64
@@ -174,18 +133,42 @@ func processUpload(db *sql.DB, cfg *config.Config, repository *repo.Repo, allowO
 			return
 		}
 
-		// 9. Marshal caches for DB storage.
-		manifestJSON, _ := json.Marshal(mf)
-		docsJSON, _ := json.Marshal(docs)
-		assetsJSON, _ := json.Marshal(assets)
+		// 9. Marshal caches for DB storage. Marshal errors would mean a
+		// programming bug (collectDocs/collectAssets return well-typed
+		// maps, manifest is struct-only). Surface as 500 so we never
+		// silently write "{}" to manifest_json.
+		manifestJSON, err := json.Marshal(mf)
+		if err != nil {
+			repository.Discard(stage.StagingDir)
+			writeInternal(w, "marshal_manifest", err)
+			return
+		}
+		docsJSON, err := json.Marshal(parsed.docs)
+		if err != nil {
+			repository.Discard(stage.StagingDir)
+			writeInternal(w, "marshal_docs", err)
+			return
+		}
+		assetsJSON, err := json.Marshal(parsed.assets)
+		if err != nil {
+			repository.Discard(stage.StagingDir)
+			writeInternal(w, "marshal_assets", err)
+			return
+		}
 
 		// 10. DB tx: delete existing row (overwrite) → insert new release →
 		//     sync app_tags → bump apps cache fields.
-		releaseNotes := docs[docChangelog]
+		releaseNotes := parsed.docs[docChangelog]
 		iconPath := ""
-		for _, a := range assets {
+		for _, a := range parsed.assets {
 			if a["kind"] == "icon" {
-				iconPath = a["path"].(string)
+				// Type assertion with ok-check — the asset map is built by
+				// collectAssets one line above, so path is always a string
+				// today, but a future asset kind that uses a non-string
+				// path would panic here without the guard.
+				if p, ok := a["path"].(string); ok {
+					iconPath = p
+				}
 				break
 			}
 		}
@@ -198,6 +181,14 @@ func processUpload(db *sql.DB, cfg *config.Config, repository *repo.Repo, allowO
 			visibility = "public"
 		}
 		now := time.Now().Unix()
+
+		// Capture the previous apps.latest_version so we can compensate
+		// if Promote fails after Commit. Without this we'd leave the apps
+		// cache pointing at a release whose package is missing on disk.
+		var prevLatest string
+		_ = db.QueryRowContext(r.Context(),
+			`SELECT latest_version FROM apps WHERE app_id = ?`, appID,
+		).Scan(&prevLatest)
 
 		tx, err := db.BeginTx(r.Context(), nil)
 		if err != nil {
@@ -223,13 +214,25 @@ func processUpload(db *sql.DB, cfg *config.Config, repository *repo.Repo, allowO
 				docs_json, assets_json, release_notes, created_at, created_by
 			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			appID, mf.Version, ver.Major, ver.Minor, ver.Patch, ver.Pre,
-			string(manifestBytes), string(manifestJSON),
+			string(parsed.manifestBytes), string(manifestJSON),
 			stage.Size, stage.SHA256Hex,
 			string(docsJSON), string(assetsJSON),
 			releaseNotes, now, uid,
 		)
 		if err != nil {
 			repository.Discard(stage.StagingDir)
+			// POST concurrency: two clients saw existingID=0 (the SELECT
+			// raced with the other tx), both INSERT, second one hits the
+			// UNIQUE(app_id, version) constraint. Surface as 409 so the
+			// caller can retry with PUT to overwrite, matching the
+			// existingID>0 path above.
+			if isUniqueViolation(err) {
+				writeJSON(w, http.StatusConflict, map[string]interface{}{
+					"error":   "version_exists",
+					"version": mf.Version,
+				})
+				return
+			}
 			writeInternal(w, "insert_release", err)
 			return
 		}
@@ -268,10 +271,28 @@ func processUpload(db *sql.DB, cfg *config.Config, repository *repo.Repo, allowO
 			return
 		}
 
-		// 11. Promote staging → final. If this fails the DB row exists but
-		// the package is absent — caller recovers by re-PUT.
+		// 11. Promote staging → final. FS operations can't be enrolled in
+		// the SQL tx, so a failure here leaves the DB row committed but
+		// the package absent on disk. Compensate by deleting the release
+		// row and reverting apps.latest_version to its previous value so
+		// the catalog API and apps cache stay consistent. The compensation
+		// is best-effort — its own errors are logged but do not mask the
+		// original Promote error.
 		if _, err := repository.Promote(stage.StagingDir, appID, mf.Version); err != nil {
-			log.Printf("dev.promote PANIC %s/%s failed AFTER DB commit: %v", appID, mf.Version, err)
+			repository.Discard(stage.StagingDir)
+			log.Printf("dev.promote_failed %s/%s after DB commit: %v — compensating", appID, mf.Version, err)
+			if _, derr := db.ExecContext(r.Context(),
+				`DELETE FROM app_releases WHERE app_id = ? AND version = ?`,
+				appID, mf.Version,
+			); derr != nil {
+				log.Printf("dev.compensate_delete_failed %s/%s: %v", appID, mf.Version, derr)
+			}
+			if _, derr := db.ExecContext(r.Context(),
+				`UPDATE apps SET latest_version = ?, updated_at = ? WHERE app_id = ?`,
+				prevLatest, time.Now().Unix(), appID,
+			); derr != nil {
+				log.Printf("dev.compensate_apps_revert_failed %s: %v", appID, derr)
+			}
 			writeError(w, http.StatusInternalServerError, "internal")
 			return
 		}
@@ -283,15 +304,19 @@ func processUpload(db *sql.DB, cfg *config.Config, repository *repo.Repo, allowO
 			"package_size":   stage.Size,
 			"package_sha256": stage.SHA256Hex,
 			"manifest":       mf,
-			"docs":           docNames(docs),
-			"assets":         assetPaths(assets),
+			"docs":           docNames(parsed.docs),
+			"assets":         assetPaths(parsed.assets),
 			"created_at":     now,
 		})
 	}
 }
 
 // ListDevReleases returns the full release history for one app, newest first.
-// Admin view — includes sha256 and size.
+// Admin view — includes sha256 and size. Ordering happens in Go via
+// semver.Parsed.Compare because SQLite's text ordering of version_pre does
+// not match semver §11 (e.g. "rc.11" < "rc.2" lexically, but rc.11 > rc.2
+// semantically). The schema still stores version_major/minor/patch/pre for
+// potential indexing use, but they are not trusted for ordering.
 func ListDevReleases(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		appID := r.PathValue("app_id")
@@ -299,9 +324,7 @@ func ListDevReleases(db *sql.DB) http.HandlerFunc {
 			`SELECT version, package_size, package_sha256, manifest_json,
 			       release_notes, created_at, created_by
 			  FROM app_releases
-			 WHERE app_id = ?
-			 ORDER BY version_major DESC, version_minor DESC,
-			          version_patch DESC, version_pre ASC`,
+			 WHERE app_id = ?`,
 			appID,
 		)
 		if err != nil {
@@ -341,6 +364,7 @@ func ListDevReleases(db *sql.DB) http.HandlerFunc {
 			writeInternal(w, "list_rows_err", err)
 			return
 		}
+		sortReleasesBySemverDesc(out, func(i int) string { return out[i].Version })
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"app_id":   appID,
 			"releases": out,
@@ -376,22 +400,33 @@ func DeleteRelease(db *sql.DB, repository *repo.Repo) http.HandlerFunc {
 			return
 		}
 
-		// Recompute apps.latest_version.
-		var latest sql.NullString
-		if err := tx.QueryRowContext(r.Context(),
-			`SELECT version FROM app_releases
-			  WHERE app_id = ?
-			  ORDER BY version_major DESC, version_minor DESC, version_patch DESC, version_pre ASC
-			  LIMIT 1`,
+		// Recompute apps.latest_version. Ordering is done in Go because
+		// SQLite's text ordering of version_pre does not match semver §11
+		// (see sortReleasesBySemverDesc doc).
+		versionRows, err := tx.QueryContext(r.Context(),
+			`SELECT version FROM app_releases WHERE app_id = ?`,
 			appID,
-		).Scan(&latest); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		)
+		if err != nil {
 			writeInternal(w, "delete_recompute_latest", err)
 			return
 		}
-		newLatest := ""
-		if latest.Valid {
-			newLatest = latest.String
+		var versions []string
+		for versionRows.Next() {
+			var v string
+			if err := versionRows.Scan(&v); err != nil {
+				versionRows.Close()
+				writeInternal(w, "delete_recompute_scan", err)
+				return
+			}
+			versions = append(versions, v)
 		}
+		versionRows.Close()
+		if err := versionRows.Err(); err != nil {
+			writeInternal(w, "delete_recompute_rows", err)
+			return
+		}
+		newLatest := pickLatestVersion(versions)
 		if _, err := tx.ExecContext(r.Context(),
 			`UPDATE apps SET latest_version = ?, updated_at = ? WHERE app_id = ?`,
 			newLatest, time.Now().Unix(), appID,
@@ -451,6 +486,94 @@ func readCappedFile(path string, max int) ([]byte, error) {
 	}
 	defer f.Close()
 	return io.ReadAll(io.LimitReader(f, int64(max)+1))
+}
+
+// parsedPackage bundles everything processUpload needs after manifest +
+// docs + assets validation has passed. Built by parseStagedPackage so
+// processUpload can stay linear and not re-do validation inlined.
+type parsedPackage struct {
+	manifestBytes []byte
+	mf            manifest.Manifest
+	ver           semver.Parsed
+	docs          map[string]string
+	assets        []map[string]interface{}
+}
+
+// parseStagedPackage runs the validation steps that depend only on the
+// extracted staging dir (steps 4-7 of the original processUpload): manifest
+// presence/size/parse, URL version match for PUT, README presence, and
+// docs/assets collection with per-file caps.
+//
+// On any failure it writes the appropriate 400 response, Discards the
+// staging dir, and returns (zero, false) so the caller just returns. On
+// success returns (parsed, true); the caller owns the staging dir for the
+// remaining DB/FS dance.
+func parseStagedPackage(
+	w http.ResponseWriter,
+	repository *repo.Repo,
+	stagingDir string,
+	files []string,
+	cfg *config.Config,
+	urlVersion string,
+) (parsedPackage, bool) {
+	if !containsFile(files, "manifest.yaml") {
+		repository.Discard(stagingDir)
+		writeError(w, http.StatusBadRequest, "manifest_required")
+		return parsedPackage{}, false
+	}
+	manifestBytes, err := readCappedFile(filepath.Join(stagingDir, "extracted", "manifest.yaml"), cfg.MaxManifestBytes)
+	if err != nil {
+		repository.Discard(stagingDir)
+		writeError(w, http.StatusBadRequest, "manifest_too_large")
+		return parsedPackage{}, false
+	}
+	mf, ver, err := manifest.ParseAndValidate(manifestBytes)
+	if err != nil {
+		repository.Discard(stagingDir)
+		var ve *manifest.ValidationError
+		if errors.As(err, &ve) {
+			writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+				"error":  "invalid_manifest",
+				"fields": ve.Fields,
+			})
+			return parsedPackage{}, false
+		}
+		writeError(w, http.StatusBadRequest, "invalid_manifest")
+		return parsedPackage{}, false
+	}
+	if urlVersion != "" && urlVersion != mf.Version {
+		repository.Discard(stagingDir)
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
+			"error":    "version_mismatch",
+			"url":      urlVersion,
+			"manifest": mf.Version,
+		})
+		return parsedPackage{}, false
+	}
+	if !containsFile(files, docReadme) {
+		repository.Discard(stagingDir)
+		writeError(w, http.StatusBadRequest, "readme_required")
+		return parsedPackage{}, false
+	}
+	docs, err := collectDocs(stagingDir, files, cfg)
+	if err != nil {
+		repository.Discard(stagingDir)
+		writeError(w, http.StatusBadRequest, err.Error())
+		return parsedPackage{}, false
+	}
+	assets, err := collectAssets(stagingDir, files, cfg)
+	if err != nil {
+		repository.Discard(stagingDir)
+		writeError(w, http.StatusBadRequest, err.Error())
+		return parsedPackage{}, false
+	}
+	return parsedPackage{
+		manifestBytes: manifestBytes,
+		mf:            mf,
+		ver:           ver,
+		docs:          docs,
+		assets:        assets,
+	}, true
 }
 
 func collectDocs(stagingDir string, files []string, cfg *config.Config) (map[string]string, error) {

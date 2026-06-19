@@ -65,9 +65,9 @@ func appBase(appID string) string {
 // assertAppVisible writes 404 and returns false if the app does not exist
 // or is private. "public" and "unlisted" both pass — unlisted differs only
 // by being omitted from list responses.
-func assertAppVisible(w http.ResponseWriter, db *sql.DB, appID string) bool {
+func assertAppVisible(w http.ResponseWriter, db *sql.DB, ctx context.Context, appID string) bool {
 	var vis string
-	err := db.QueryRow(`SELECT visibility FROM apps WHERE app_id = ?`, appID).Scan(&vis)
+	err := db.QueryRowContext(ctx, `SELECT visibility FROM apps WHERE app_id = ?`, appID).Scan(&vis)
 	switch {
 	case errors.Is(err, sql.ErrNoRows) || vis == "private":
 		writeError(w, http.StatusNotFound, "not_found")
@@ -80,12 +80,12 @@ func assertAppVisible(w http.ResponseWriter, db *sql.DB, appID string) bool {
 }
 
 // assertReleaseVisible combines assertAppVisible + release existence.
-func assertReleaseVisible(w http.ResponseWriter, db *sql.DB, appID, version string) bool {
-	if !assertAppVisible(w, db, appID) {
+func assertReleaseVisible(w http.ResponseWriter, db *sql.DB, ctx context.Context, appID, version string) bool {
+	if !assertAppVisible(w, db, ctx, appID) {
 		return false
 	}
 	var x int
-	err := db.QueryRow(
+	err := db.QueryRowContext(ctx,
 		`SELECT 1 FROM app_releases WHERE app_id = ? AND version = ?`,
 		appID, version,
 	).Scan(&x)
@@ -100,8 +100,8 @@ func assertReleaseVisible(w http.ResponseWriter, db *sql.DB, appID, version stri
 	return true
 }
 
-func fetchAppTags(db *sql.DB, appID string) ([]string, error) {
-	rows, err := db.Query(`SELECT tag FROM app_tags WHERE app_id = ? ORDER BY tag`, appID)
+func fetchAppTags(db *sql.DB, ctx context.Context, appID string) ([]string, error) {
+	rows, err := db.QueryContext(ctx, `SELECT tag FROM app_tags WHERE app_id = ? ORDER BY tag`, appID)
 	if err != nil {
 		return nil, err
 	}
@@ -171,7 +171,7 @@ func ListCatalogApps(db *sql.DB) http.HandlerFunc {
 		}
 		type appRow struct {
 			AppID, DisplayName, Summary, IconPath, LatestVersion string
-			UpdatedAt, CreatedAt                                  int64
+			UpdatedAt, CreatedAt                                 int64
 		}
 		appRows := make([]appRow, 0, size)
 		for rows.Next() {
@@ -207,7 +207,7 @@ func ListCatalogApps(db *sql.DB) http.HandlerFunc {
 		}
 		items := make([]listItem, 0, len(appRows))
 		for _, a := range appRows {
-			tags, _ := fetchAppTags(db, a.AppID)
+			tags, _ := fetchAppTags(db, r.Context(), a.AppID)
 			it := listItem{
 				AppID:         a.AppID,
 				DisplayName:   a.DisplayName,
@@ -236,7 +236,7 @@ func ListCatalogApps(db *sql.DB) http.HandlerFunc {
 func GetCatalogApp(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		appID := r.PathValue("app_id")
-		if !assertAppVisible(w, db, appID) {
+		if !assertAppVisible(w, db, r.Context(), appID) {
 			return
 		}
 
@@ -259,7 +259,7 @@ func GetCatalogApp(db *sql.DB) http.HandlerFunc {
 		}
 
 		// Tags.
-		tags, _ := fetchAppTags(db, appID)
+		tags, _ := fetchAppTags(db, r.Context(), appID)
 
 		// Latest release metadata (homepage/license/author/etc. come from
 		// the manifest cache — apps table doesn't duplicate those fields).
@@ -294,38 +294,41 @@ func GetCatalogApp(db *sql.DB) http.HandlerFunc {
 			sort.Strings(platforms)
 		}
 
+		// Public catalog responses deliberately omit author.email — the
+		// marketplace is publicly scrapable, and email harvest is the
+		// classic abuse. Dev-side endpoints (ListDevReleases etc.) keep
+		// the full author block for the admin's own view.
 		var author map[string]string
 		if mf.Author != nil {
 			author = map[string]string{
-				"name":  mf.Author.Name,
-				"email": mf.Author.Email,
-				"url":   mf.Author.URL,
+				"name": mf.Author.Name,
+				"url":  mf.Author.URL,
 			}
 		}
 
 		resp := map[string]interface{}{
-			"app_id":         appID,
-			"display_name":   displayName,
-			"description":    description,
-			"summary":        summary,
-			"icon_url":       iconURL,
-			"homepage":       mf.Homepage,
-			"license":        mf.License,
-			"author":         author,
-			"tags":           tags,
-			"keywords":       mf.Keywords,
-			"requires_os":    mf.RequiresOS,
-			"releases_url":   appBase(appID) + "/releases",
-			"updated_at":     updatedAt,
-			"created_at":     createdAt,
+			"app_id":       appID,
+			"display_name": displayName,
+			"description":  description,
+			"summary":      summary,
+			"icon_url":     iconURL,
+			"homepage":     mf.Homepage,
+			"license":      mf.License,
+			"author":       author,
+			"tags":         tags,
+			"keywords":     mf.Keywords,
+			"requires_os":  mf.RequiresOS,
+			"releases_url": appBase(appID) + "/releases",
+			"updated_at":   updatedAt,
+			"created_at":   createdAt,
 		}
 		if latestVersion != "" {
 			resp["latest_release"] = map[string]interface{}{
-				"version":          latestVersion,
-				"created_at":       releaseCreatedAt,
-				"package_size":     packageSize,
-				"platforms":        platforms,
-				"download_url":     downloadURL,
+				"version":           latestVersion,
+				"created_at":        releaseCreatedAt,
+				"package_size":      packageSize,
+				"platforms":         platforms,
+				"download_url":      downloadURL,
 				"release_notes_url": releaseNotesURL,
 			}
 		}
@@ -337,15 +340,13 @@ func GetCatalogApp(db *sql.DB) http.HandlerFunc {
 func ListCatalogReleases(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		appID := r.PathValue("app_id")
-		if !assertAppVisible(w, db, appID) {
+		if !assertAppVisible(w, db, r.Context(), appID) {
 			return
 		}
 		rows, err := db.QueryContext(r.Context(),
 			`SELECT version, package_size, created_at
 			   FROM app_releases
-			  WHERE app_id = ?
-			  ORDER BY version_major DESC, version_minor DESC,
-			           version_patch DESC, version_pre ASC`,
+			  WHERE app_id = ?`,
 			appID,
 		)
 		if err != nil {
@@ -376,6 +377,8 @@ func ListCatalogReleases(db *sql.DB) http.HandlerFunc {
 			writeInternal(w, "catalog_releases_rows", err)
 			return
 		}
+		// SQLite's text ordering of version_pre is not semver — sort in Go.
+		sortReleasesBySemverDesc(out, func(i int) string { return out[i].Version })
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"app_id":   appID,
 			"releases": out,
@@ -388,7 +391,7 @@ func GetCatalogRelease(db *sql.DB) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		appID := r.PathValue("app_id")
 		version := r.PathValue("version")
-		if !assertReleaseVisible(w, db, appID, version) {
+		if !assertReleaseVisible(w, db, r.Context(), appID, version) {
 			return
 		}
 		var (
@@ -444,7 +447,7 @@ func GetCatalogDoc(db *sql.DB) http.HandlerFunc {
 		appID := r.PathValue("app_id")
 		version := r.PathValue("version")
 		name := r.PathValue("name")
-		if !assertReleaseVisible(w, db, appID, version) {
+		if !assertReleaseVisible(w, db, r.Context(), appID, version) {
 			return
 		}
 		content, err := fetchDocContent(db, r.Context(), appID, version, name)
@@ -457,7 +460,7 @@ func GetCatalogDoc(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
-		w.Header().Set("Cache-Control", "private, max-age=60")
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		_, _ = io.WriteString(w, content)
 	}
 }
@@ -471,7 +474,7 @@ func GetCatalogDocRendered(db *sql.DB) http.HandlerFunc {
 		appID := r.PathValue("app_id")
 		version := r.PathValue("version")
 		name := r.PathValue("name")
-		if !assertReleaseVisible(w, db, appID, version) {
+		if !assertReleaseVisible(w, db, r.Context(), appID, version) {
 			return
 		}
 		content, err := fetchDocContent(db, r.Context(), appID, version, name)
@@ -489,7 +492,7 @@ func GetCatalogDocRendered(db *sql.DB) http.HandlerFunc {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Cache-Control", "private, max-age=60")
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		_, _ = io.WriteString(w, html)
 	}
 }
@@ -506,7 +509,7 @@ func GetCatalogAsset(db *sql.DB, repository *repo.Repo) http.HandlerFunc {
 			writeError(w, http.StatusNotFound, "not_found")
 			return
 		}
-		if !assertReleaseVisible(w, db, appID, version) {
+		if !assertReleaseVisible(w, db, r.Context(), appID, version) {
 			return
 		}
 		f, size, err := repository.OpenFile(appID, version, name)
@@ -534,7 +537,7 @@ func DownloadCatalogRelease(db *sql.DB, repository *repo.Repo) http.HandlerFunc 
 		appID := r.PathValue("app_id")
 		version := r.PathValue("version")
 		platform := strings.TrimSpace(r.URL.Query().Get("platform"))
-		if !assertReleaseVisible(w, db, appID, version) {
+		if !assertReleaseVisible(w, db, r.Context(), appID, version) {
 			return
 		}
 
@@ -560,6 +563,10 @@ func DownloadCatalogRelease(db *sql.DB, repository *repo.Repo) http.HandlerFunc 
 			w.Header().Set("Content-Length", strconv.FormatInt(pi.Size, 10))
 			w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
 			w.Header().Set("X-Content-SHA256", pi.SHA256)
+			// Package bytes are immutable per (app_id, version) — the
+			// dev handler only ever adds new versions, never mutates an
+			// existing one in place. Same cache contract as assets.
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 			_, _ = io.Copy(w, f)
 			return
 		}
@@ -601,6 +608,7 @@ func DownloadCatalogRelease(db *sql.DB, repository *repo.Repo) http.HandlerFunc 
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 		w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		_, _ = io.Copy(w, f)
 	}
 }

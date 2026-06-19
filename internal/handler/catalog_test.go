@@ -199,6 +199,43 @@ func TestGetCatalogApp_UnlistedAccessible(t *testing.T) {
 	}
 }
 
+// TestGetCatalogApp_AuthorEmailOmitted covers M2: the public catalog API
+// must not leak the publisher's email even when the manifest supplies one.
+// Dev-side handlers may keep it; the public catalog must not.
+func TestGetCatalogApp_AuthorEmailOmitted(t *testing.T) {
+	env := newTestEnv(t)
+	admin := env.seedUser(t, "admin@example.com", "p12345678", true)
+	manifestWithEmail := strings.Replace(validManifestYAML,
+		`author:
+  name: "Jane"`,
+		`author:
+  name: "Jane"
+  email: "jane@secret.example"`, 1)
+	seedRelease(t, env, admin, "com.foo", map[string]string{
+		"manifest.yaml": manifestWithEmail,
+		"README.md":     "x",
+	})
+
+	req := httptest.NewRequest("GET", "/api/v1/catalog/apps/com.foo", &bytes.Buffer{})
+	req.SetPathValue("app_id", "com.foo")
+	w := httptest.NewRecorder()
+	GetCatalogApp(env.db).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	body := w.Body.String()
+	if strings.Contains(body, "jane@secret.example") {
+		t.Errorf("public catalog must not expose author email: %s", body)
+	}
+	if strings.Contains(body, `"email"`) {
+		t.Errorf("public catalog must not include author.email field: %s", body)
+	}
+	// Author name should still be there (it's not PII).
+	if !strings.Contains(body, `"name":"Jane"`) {
+		t.Errorf("expected author.name in response, got %s", body)
+	}
+}
+
 // --- ListCatalogReleases / GetCatalogRelease ---
 
 func TestListCatalogReleases_NewestFirst(t *testing.T) {
@@ -241,8 +278,8 @@ func TestGetCatalogRelease_Success(t *testing.T) {
 	env := newTestEnv(t)
 	admin := env.seedUser(t, "admin@example.com", "p12345678", true)
 	seedRelease(t, env, admin, "com.foo", map[string]string{
-		"manifest.yaml":     validManifestYAML,
-		"README.md":         "x",
+		"manifest.yaml":         validManifestYAML,
+		"README.md":             "x",
 		"bin/linux-amd64/myapp": "b",
 	})
 
@@ -482,8 +519,8 @@ func TestDownloadCatalogRelease_FullPackage(t *testing.T) {
 	env := newTestEnv(t)
 	admin := env.seedUser(t, "admin@example.com", "p12345678", true)
 	seedRelease(t, env, admin, "com.foo", map[string]string{
-		"manifest.yaml":     validManifestYAML,
-		"README.md":         "x",
+		"manifest.yaml":         validManifestYAML,
+		"README.md":             "x",
 		"bin/linux-amd64/myapp": "binary-bytes-here",
 	})
 
@@ -503,6 +540,9 @@ func TestDownloadCatalogRelease_FullPackage(t *testing.T) {
 	}
 	if sha := rec.Header().Get("X-Content-SHA256"); len(sha) != 64 {
 		t.Errorf("X-Content-SHA256 len=%d, want 64", len(sha))
+	}
+	if cc := rec.Header().Get("Cache-Control"); !strings.Contains(cc, "immutable") {
+		t.Errorf("full package download must be cacheable as immutable, got Cache-Control=%q", cc)
 	}
 }
 

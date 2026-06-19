@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -328,5 +329,147 @@ func TestSanitizeJoin(t *testing.T) {
 		if !c.wantErr && err != nil {
 			t.Errorf("sanitizeJoin(%q) unexpected error: %v", c.rel, err)
 		}
+	}
+}
+
+// TestExtract_RejectsNonRegularEntries covers L6d: symlinks, hard links,
+// char/block devices, and fifos are silently skipped. The security
+// relevance is that symlinks could otherwise point outside extracted/ and
+// lure a later write into following them (TOCTOU-style escape). Skipping
+// non-TypeReg/TypeDir entries closes that surface entirely.
+func TestExtract_RejectsNonRegularEntries(t *testing.T) {
+	r := newTestRepo(t)
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
+	entries := []struct {
+		name     string
+		typeflag byte
+		link     string
+	}{
+		{"manifest.yaml", tar.TypeReg, ""},
+		{"README.md", tar.TypeReg, ""},
+		{"escape-symlink", tar.TypeSymlink, "../../etc/passwd"},
+		{"hardlink-to-readme", tar.TypeLink, "README.md"},
+		{"chardev", tar.TypeChar, ""},
+		{"blockdev", tar.TypeBlock, ""},
+		{"fifo", tar.TypeFifo, ""},
+	}
+	for _, e := range entries {
+		hdr := &tar.Header{
+			Name:     e.name,
+			Typeflag: e.typeflag,
+			Linkname: e.link,
+			Mode:     0o644,
+		}
+		if e.typeflag == tar.TypeReg {
+			hdr.Size = int64(len("data\n"))
+		}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatalf("header %s: %v", e.name, err)
+		}
+		if e.typeflag == tar.TypeReg {
+			tw.Write([]byte("data\n"))
+		}
+	}
+	tw.Close()
+	gw.Close()
+
+	res, err := r.Stage("com.foo", "1.0.0", bytes.NewReader(buf.Bytes()), 64*1024)
+	if err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	paths, err := r.Extract(res.StagingDir)
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	got := make(map[string]bool, len(paths))
+	for _, p := range paths {
+		got[p] = true
+	}
+	// Only the two TypeReg entries should be on disk.
+	if !got["manifest.yaml"] || !got["README.md"] {
+		t.Errorf("expected the two regular files, got %+v", paths)
+	}
+	for _, bad := range []string{
+		"escape-symlink", "hardlink-to-readme",
+		"chardev", "blockdev", "fifo",
+	} {
+		if got[bad] {
+			t.Errorf("non-regular entry %q must be skipped, not extracted", bad)
+		}
+		if _, err := os.Stat(filepath.Join(res.StagingDir, "extracted", bad)); err == nil {
+			t.Errorf("non-regular entry %q must not exist on disk", bad)
+		}
+	}
+	// The symlink target outside extracted/ must NOT have been created.
+	if _, err := os.Stat(filepath.Join(r.Root(), "etc", "passwd")); err == nil {
+		t.Errorf("symlink escape created a file outside extracted/")
+	}
+}
+
+// TestExtract_RejectsOversizedFile covers the per-file cap (M5). The
+// declared header size is above MaxExtractedPerFile, so Extract must
+// refuse without writing anything.
+func TestExtract_RejectsOversizedFile(t *testing.T) {
+	r := newTestRepo(t)
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
+	if err := tw.WriteHeader(&tar.Header{
+		Name:     "huge.bin",
+		Typeflag: tar.TypeReg,
+		Size:     MaxExtractedPerFile + 1,
+		Mode:     0o644,
+	}); err != nil {
+		t.Fatalf("header: %v", err)
+	}
+	tw.Close()
+	gw.Close()
+
+	res, err := r.Stage("com.foo", "1.0.0", bytes.NewReader(buf.Bytes()), 64*1024)
+	if err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	_, err = r.Extract(res.StagingDir)
+	if !errors.Is(err, ErrExtractLimitExceeded) {
+		t.Errorf("expected ErrExtractLimitExceeded, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(res.StagingDir, "extracted", "huge.bin")); err == nil {
+		t.Errorf("oversized file must not be written to disk")
+	}
+}
+
+// TestExtract_RejectsTooManyFiles covers the file-count cap (M5). The
+// tar.gz declares more than MaxExtractedFileCount entries; Extract must
+// stop and surface ErrExtractLimitExceeded.
+func TestExtract_RejectsTooManyFiles(t *testing.T) {
+	// Build a tar.gz with MaxExtractedFileCount+10 tiny entries.
+	r := newTestRepo(t)
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
+	for i := 0; i < MaxExtractedFileCount+10; i++ {
+		name := fmt.Sprintf("f%d", i)
+		if err := tw.WriteHeader(&tar.Header{
+			Name:     name,
+			Typeflag: tar.TypeReg,
+			Size:     1,
+			Mode:     0o644,
+		}); err != nil {
+			t.Fatalf("header %s: %v", name, err)
+		}
+		tw.Write([]byte("x"))
+	}
+	tw.Close()
+	gw.Close()
+
+	res, err := r.Stage("com.foo", "1.0.0", bytes.NewReader(buf.Bytes()), 64*1024*1024)
+	if err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	_, err = r.Extract(res.StagingDir)
+	if !errors.Is(err, ErrExtractLimitExceeded) {
+		t.Errorf("expected ErrExtractLimitExceeded for too many files, got %v", err)
 	}
 }

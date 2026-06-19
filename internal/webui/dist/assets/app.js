@@ -78,7 +78,7 @@ window.addEventListener('popstate', () => { routeSignal.value = parseLocation();
 
 // Public marketplace paths — visible without login. Everything else
 // (cfg-sync /me/*, /admin/*, /show-token/*) requires a valid JWT.
-const PUBLIC_PATHS = ['/', '/apps', '/tags'];
+const PUBLIC_PATHS = ['/', '/apps'];
 function isPublicPath(path) {
   if (path === '/login' || path === '/register') return false;
   for (const p of PUBLIC_PATHS) {
@@ -1455,7 +1455,10 @@ function CatalogReleaseDetail({ appId, version }) {
       </div>
       ${data?.package_sha256 ? html`
         <div class="catalog-sha">
-          <strong>SHA256:</strong> <code>${data.package_sha256}</code>
+          <strong>全包 SHA256:</strong> <code>${data.package_sha256}</code>
+          <div class="muted" style="font-size:12px;margin-top:4px">
+            平台二进制单独下载时不附 sha256；如需校验请下载完整包后用此值验证。
+          </div>
         </div>
       ` : null}
     </div>

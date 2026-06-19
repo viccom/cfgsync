@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -123,11 +124,11 @@ func TestMigrate_CreatesAppMarketTables(t *testing.T) {
 	// apps must carry the v3 columns (visibility CHECK, latest_version,
 	// updated_at NOT NULL, summary/icon_path/owner_user_id).
 	var (
-		visibility     string
-		latestVersion  string
-		summary        string
-		iconPath       string
-		ownerUserID    sql.NullString
+		visibility    string
+		latestVersion string
+		summary       string
+		iconPath      string
+		ownerUserID   sql.NullString
 	)
 	err := d.QueryRow(
 		`SELECT visibility, latest_version, summary, icon_path, owner_user_id
@@ -163,5 +164,81 @@ func seedAppRow(t *testing.T, d *sql.DB, appID, displayName string) {
 		appID, displayName,
 	); err != nil {
 		t.Fatalf("seed app: %v", err)
+	}
+}
+
+// TestMigrate_V2StyleAppsTable_FailsLoud covers H3: when the DB was created
+// by a v2-era binary (apps table missing the v3 column set), applying v3
+// must NOT silently succeed. The schema_version ledger is the contract that
+// "version=X applied" implies the runtime can use all v3 columns. Without
+// the explicit column probe, CREATE TABLE IF NOT EXISTS would no-op and the
+// ledger would lie — runtime queries on apps.visibility would fail with
+// "no such column" instead of an upfront migrate-time error.
+func TestMigrate_V2StyleAppsTable_FailsLoud(t *testing.T) {
+	tmp, err := os.CreateTemp(t.TempDir(), "cfgsync-v2-*.db")
+	if err != nil {
+		t.Fatalf("temp: %v", err)
+	}
+	tmp.Close()
+
+	d, err := Open(tmp.Name())
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() {
+		d.Close()
+		os.Remove(tmp.Name())
+		os.Remove(tmp.Name() + "-wal")
+		os.Remove(tmp.Name() + "-shm")
+	})
+
+	// Build a v2-era apps table: no visibility / summary / icon_path /
+	// latest_version / updated_at / owner_user_id. Also pre-seed a row so
+	// the failure surfaces on a realistic table, not an empty shell.
+	if _, err := d.Exec(`CREATE TABLE users (
+		id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL COLLATE NOCASE,
+		password_hash TEXT NOT NULL, is_admin INTEGER NOT NULL DEFAULT 0,
+		created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`); err != nil {
+		t.Fatalf("create users: %v", err)
+	}
+	if _, err := d.Exec(`INSERT INTO users (id, email, password_hash, is_admin, created_at, updated_at)
+		VALUES ('u', 'a@b', 'x', 1, 0, 0)`); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	if _, err := d.Exec(`CREATE TABLE apps (
+		app_id TEXT PRIMARY KEY, display_name TEXT NOT NULL,
+		description TEXT NOT NULL DEFAULT '',
+		created_at INTEGER NOT NULL,
+		created_by TEXT NOT NULL REFERENCES users(id))`); err != nil {
+		t.Fatalf("create v2 apps: %v", err)
+	}
+	if _, err := d.Exec(`INSERT INTO apps (app_id, display_name, created_at, created_by)
+		VALUES ('com.foo', 'Foo', 0, 'u')`); err != nil {
+		t.Fatalf("seed app: %v", err)
+	}
+	// Pretend the ledger only knows about v2.
+	if _, err := d.Exec(`CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)`); err != nil {
+		t.Fatalf("create schema_version: %v", err)
+	}
+	if _, err := d.Exec(`INSERT INTO schema_version (version, applied_at) VALUES (1, 0), (2, 0)`); err != nil {
+		t.Fatalf("seed ledger: %v", err)
+	}
+
+	err = Migrate(d)
+	if err == nil {
+		t.Fatalf("Migrate must error when apps is missing v3 columns, got nil")
+	}
+	if !strings.Contains(err.Error(), "missing column") {
+		t.Errorf("error must mention missing column, got: %v", err)
+	}
+
+	// The ledger must NOT record v3 as applied — otherwise the next start
+	// would skip the migration and continue into a broken runtime.
+	var n int
+	if err := d.QueryRow(`SELECT COUNT(*) FROM schema_version WHERE version = 3`).Scan(&n); err != nil {
+		t.Fatalf("ledger probe: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("ledger must not record v3 as applied, but found %d row(s)", n)
 	}
 }

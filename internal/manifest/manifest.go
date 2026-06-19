@@ -4,7 +4,6 @@
 package manifest
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -18,21 +17,25 @@ import (
 // Manifest is the parsed manifest.yaml structure. Mirrors model.Manifest
 // shape; this package owns parsing + validation invariants, model owns
 // JSON serialization for the API layer.
+//
+// "extra" is intentionally NOT supported yet: yaml.v3 does not round-trip
+// arbitrary YAML into json.RawMessage cleanly (it errors on scalars and
+// produces invalid JSON on lists), so a future schema v2 will need a
+// yaml.Node-based implementation if/when extra becomes a real requirement.
 type Manifest struct {
-	SchemaVersion int                         `yaml:"schema_version" json:"schema_version"`
-	Version       string                      `yaml:"version" json:"version"`
-	DisplayName   string                      `yaml:"display_name" json:"display_name"`
-	Description   string                      `yaml:"description" json:"description,omitempty"`
-	Summary       string                      `yaml:"summary" json:"summary,omitempty"`
-	License       string                      `yaml:"license" json:"license,omitempty"`
-	Homepage      string                      `yaml:"homepage" json:"homepage,omitempty"`
-	Tags          []string                    `yaml:"tags" json:"tags,omitempty"`
-	Keywords      []string                    `yaml:"keywords" json:"keywords,omitempty"`
-	Author        *Author                     `yaml:"author" json:"author,omitempty"`
-	RequiresOS    []string                    `yaml:"requires_os" json:"requires_os,omitempty"`
-	Platforms     map[string]Platform         `yaml:"platforms" json:"platforms,omitempty"`
-	Visibility    string                      `yaml:"visibility" json:"visibility,omitempty"`
-	Extra         json.RawMessage             `yaml:"extra" json:"extra,omitempty"`
+	SchemaVersion int                 `yaml:"schema_version" json:"schema_version"`
+	Version       string              `yaml:"version" json:"version"`
+	DisplayName   string              `yaml:"display_name" json:"display_name"`
+	Description   string              `yaml:"description" json:"description,omitempty"`
+	Summary       string              `yaml:"summary" json:"summary,omitempty"`
+	License       string              `yaml:"license" json:"license,omitempty"`
+	Homepage      string              `yaml:"homepage" json:"homepage,omitempty"`
+	Tags          []string            `yaml:"tags" json:"tags,omitempty"`
+	Keywords      []string            `yaml:"keywords" json:"keywords,omitempty"`
+	Author        *Author             `yaml:"author" json:"author,omitempty"`
+	RequiresOS    []string            `yaml:"requires_os" json:"requires_os,omitempty"`
+	Platforms     map[string]Platform `yaml:"platforms" json:"platforms,omitempty"`
+	Visibility    string              `yaml:"visibility" json:"visibility,omitempty"`
 }
 
 // Author is the optional author block.
@@ -43,9 +46,12 @@ type Author struct {
 }
 
 // Platform describes one (os-arch) → binary mapping inside the package.
+// cfgsync does not maintain a per-binary sha256 — only the full package
+// sha256 (computed at upload time, returned by the catalog download
+// endpoint via X-Content-SHA256). Clients that want binary-level integrity
+// should download the full package and verify against the package sha256.
 type Platform struct {
-	Path   string `yaml:"path" json:"path"`
-	SHA256 string `yaml:"sha256,omitempty" json:"sha256,omitempty"`
+	Path string `yaml:"path" json:"path"`
 }
 
 // FieldError reports one invalid field with a path-style name (e.g.
@@ -161,8 +167,17 @@ func ParseAndValidate(raw []byte) (Manifest, semver.Parsed, error) {
 	if m.Homepage != "" {
 		if len(m.Homepage) > MaxHomepage {
 			vErr.Fields = append(vErr.Fields, FieldError{Field: "homepage", Reason: "too long"})
-		} else if _, err := url.Parse(m.Homepage); err != nil {
-			vErr.Fields = append(vErr.Fields, FieldError{Field: "homepage", Reason: "invalid URL"})
+		} else {
+			// url.Parse accepts almost anything; require an explicit
+			// http/https scheme so the catalog UI can safely render
+			// <a href=${homepage}> without javascript:/data: sinks.
+			u, err := url.Parse(m.Homepage)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+				vErr.Fields = append(vErr.Fields, FieldError{
+					Field:  "homepage",
+					Reason: "must be an http(s) URL",
+				})
+			}
 		}
 	}
 
